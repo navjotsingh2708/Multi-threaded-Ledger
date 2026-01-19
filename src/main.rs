@@ -1,0 +1,65 @@
+use std::{io::{self, Write}, sync::mpsc, thread};
+use multi_threaded_ledger::Ledger;
+
+fn read_cli(command: &str) -> String {
+    print!("{command}");
+    io::stdout().flush().unwrap();
+    let mut c = String::new();
+    io::stdin().read_line(&mut c).unwrap();
+    let c = c.trim().to_string();
+    c
+}
+
+fn main() {
+    let (tx, rx) = mpsc::channel();
+    let ledger = Ledger::new();
+    let handle = thread::spawn(move || {
+        ledger.run(rx);
+    });
+    loop {
+        let input = read_cli("> ");
+        match input.as_str() {
+            "1" | "add" => {
+                let sender = read_cli("Sender - ");
+                let amount = read_cli("Amount - ");
+                let receiver = read_cli("Receiver - ");
+                let amount: u32 = match amount.parse::<u32>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        println!("Invalid amount");
+                        continue;
+                    }
+                };
+
+                let (resp_tx, resp_rx) = mpsc::channel();
+
+                tx.send(multi_threaded_ledger::LedgerRequest::AddTransaction { sender, receiver, amount, respond_to: resp_tx }).unwrap();
+
+                match resp_rx.recv().unwrap() {
+                    Ok(_) => println!("Transaction added."),
+                    Err(e) => println!("Error: {:?}", e),
+                }
+                
+            }
+
+            "2" | "list" => {
+                let (resp_tx, resp_rx) = mpsc::channel();
+                tx.send(multi_threaded_ledger::LedgerRequest::ListTransaction { respond_to: resp_tx }).unwrap();
+                match resp_rx.recv() {
+                   Ok(l) => println!("{:?}", l),
+                   Err(e) => println!("{e}"), 
+                }
+            }
+
+            "3" | "shutdown" => {
+                tx.send(multi_threaded_ledger::LedgerRequest::ShutDown).unwrap();
+                break;
+
+            }
+
+            _ => println!("Unknown command.")
+        }
+    }
+    handle.join().unwrap();
+    println!("Ledger shut down cleanly.");
+}
