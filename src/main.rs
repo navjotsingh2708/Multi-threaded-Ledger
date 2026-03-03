@@ -30,7 +30,16 @@ fn main() {
                         continue;
                     }
                 };
-
+                
+                let (resp_tx, resp_rx) = mpsc::channel();
+                tx.send(multi_threaded_ledger::LedgerRequest::Contains { sender: sender, receiver, respond_to: resp_tx }).unwrap();
+                match resp_rx.recv().unwrap() {
+                    Ok(_) => (),
+                    Err(e) => {
+                        println!("Error: {:?}", e);
+                        continue;
+                    },
+                }
                 let (resp_tx, resp_rx) = mpsc::channel();
 
                 tx.send(multi_threaded_ledger::LedgerRequest::AddTransaction { sender, receiver, amount, respond_to: resp_tx }).unwrap();
@@ -56,7 +65,23 @@ fn main() {
                 break;
 
             }
-
+            "4" | "profile" => {
+                let name = read_cli("Name - ");
+                let balance = read_cli("balance - ");
+                let balance:i32 = match balance.parse::<i32>() {
+                    Ok(b) => b,
+                    Err(_) => {
+                        println!("Invalid balance");
+                        continue;
+                    }
+                };
+                let (resp_tx, resp_rx) = mpsc::channel();
+                tx.send(multi_threaded_ledger::LedgerRequest::Profile { name, balance, respond_to: resp_tx }).unwrap();
+                match resp_rx.recv().unwrap() {
+                    Ok(_) => println!("Account created."),
+                    Err(e) => println!("Error: {:?}", e),
+                }
+            }
             _ => println!("Unknown command.")
         }
     }
