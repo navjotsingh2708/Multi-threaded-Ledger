@@ -23,7 +23,8 @@ fn main() {
                 let sender = read_cli("Sender - ");
                 let amount = read_cli("Amount - ");
                 let receiver = read_cli("Receiver - ");
-                let amount: u32 = match amount.parse::<u32>() {
+                let timestamp = chrono::Utc::now().timestamp();
+                let amount: u64 = match amount.parse::<u64>() {
                     Ok(v) => v,
                     Err(_) => {
                         println!("Invalid amount");
@@ -32,17 +33,8 @@ fn main() {
                 };
                 
                 let (resp_tx, resp_rx) = mpsc::channel();
-                tx.send(multi_threaded_ledger::LedgerRequest::Contains { sender: sender, receiver, respond_to: resp_tx }).unwrap();
-                match resp_rx.recv().unwrap() {
-                    Ok(_) => (),
-                    Err(e) => {
-                        println!("Error: {:?}", e);
-                        continue;
-                    },
-                }
-                let (resp_tx, resp_rx) = mpsc::channel();
 
-                tx.send(multi_threaded_ledger::LedgerRequest::AddTransaction { sender, receiver, amount, respond_to: resp_tx }).unwrap();
+                tx.send(multi_threaded_ledger::LedgerRequest::AddTransaction { sender, receiver, amount, timestamp, respond_to: resp_tx }).unwrap();
 
                 match resp_rx.recv().unwrap() {
                     Ok(_) => println!("Transaction added."),
@@ -60,15 +52,10 @@ fn main() {
                 }
             }
 
-            "3" | "shutdown" => {
-                tx.send(multi_threaded_ledger::LedgerRequest::ShutDown).unwrap();
-                break;
-
-            }
-            "4" | "profile" => {
+            "3" | "profile" => {
                 let name = read_cli("Name - ");
                 let balance = read_cli("balance - ");
-                let balance:i32 = match balance.parse::<i32>() {
+                let balance:u64 = match balance.parse::<u64>() {
                     Ok(b) => b,
                     Err(_) => {
                         println!("Invalid balance");
@@ -81,6 +68,22 @@ fn main() {
                     Ok(_) => println!("Account created."),
                     Err(e) => println!("Error: {:?}", e),
                 }
+            }
+
+            "4" | "balance" => {
+                let name = read_cli("Name - ");
+                let (resp_tx, resp_rx) = mpsc::channel();
+                tx.send(multi_threaded_ledger::LedgerRequest::GetBalance { name, respond_to: resp_tx }).unwrap();
+                match resp_rx.recv().unwrap() {
+                    Ok(b) => println!("Balance - {b}"),
+                    Err(e) => println!("Error: {:?}", e),
+                }
+            }
+
+            "5" | "shutdown" => {
+                tx.send(multi_threaded_ledger::LedgerRequest::ShutDown).unwrap();
+                break;
+
             }
             _ => println!("Unknown command.")
         }
