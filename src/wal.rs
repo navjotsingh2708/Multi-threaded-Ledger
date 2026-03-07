@@ -1,7 +1,5 @@
 use std::io::{Write, BufWriter};
-use std::fs::{File, OpenOptions};
-
-use crate::Transaction;
+use std::fs::{File};
 
 pub struct Wal {
     writer: BufWriter<File>,
