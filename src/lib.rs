@@ -1,13 +1,14 @@
-use std::{collections::HashMap, sync::mpsc::{Receiver, Sender}};
+use std::{collections::HashMap, fs, io::BufReader, sync::mpsc::{Receiver, Sender}};
 mod wal;
+use bincode::Options;
 
 #[derive(Debug, Clone)]
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Transaction {
     pub sender: String,
     pub receiver: String,
     pub amount: u64,
-    pub timestamp: i64
+    pub timestamp: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -15,8 +16,8 @@ struct Profiles {
     accounts: HashMap<String, u64>,
 }
 pub struct Ledger {
-    pub entries: Vec<Transaction>,
-    accounts: Profiles
+    accounts: Profiles,
+    wal: wal::Wal,
 }
 
 #[derive(Debug)]
@@ -51,6 +52,7 @@ pub enum TransactionError {
     AccountNotFound,
     AccountAlreadyExists,
     NotEnoughBalance,
+    IoError,
 }
 
 impl Transaction {
@@ -66,11 +68,13 @@ impl Transaction {
 }
 
 impl Ledger {
-    pub fn new() -> Self {
-        Ledger { entries: vec![] , accounts: Profiles { accounts: HashMap::new() }}
+    pub fn new(path: &str) -> std::io::Result<Self> {
+        let wal = wal::Wal::new(path)?;
+        Ok(Ledger {accounts: Profiles { accounts: HashMap::new() }, wal})
     }
 
     pub fn run(mut self, rx: Receiver<LedgerRequest>) {
+        self.recover().ok();
         while let Ok(msg) = rx.recv() {
             match msg {
                 LedgerRequest::AddTransaction { sender, receiver, amount, timestamp, respond_to } => {
@@ -79,7 +83,7 @@ impl Ledger {
                 }
 
                 LedgerRequest::ListTransaction { respond_to } => {
-                    let result = self.entries.clone();
+                    let result = self.list_transactions();
                     let _ = respond_to.send(result);
                 }
 
@@ -100,7 +104,16 @@ impl Ledger {
         }
     }
 
-    pub fn add(&mut self, sender: String, receiver: String, amount: u64, timestamp: i64) -> Result<(), TransactionError> {
+    fn apply_transaction(&mut self, tx: Transaction) {
+        let sender_bal = self.accounts.accounts.entry(tx.sender).or_insert(0);
+        *sender_bal = sender_bal.saturating_sub(tx.amount);
+        
+        let rec_bal = self.accounts.accounts.entry(tx.receiver).or_insert(0);
+        *rec_bal = rec_bal.saturating_add(tx.amount);
+    }
+
+    pub fn add(&mut self, sender: String, receiver: String, amount: u64, timestamp: i64, signature: vec<u8>) -> Result<(), TransactionError> {
+
         let transaction = Transaction::new(&sender, &receiver, amount, timestamp)?;
         
         let sender_balance = self
@@ -121,11 +134,11 @@ impl Ledger {
         if amount > *sender_balance {
             return Err(TransactionError::NotEnoughBalance);
         }
-        
-        *self.accounts.accounts.get_mut(&sender).unwrap() -= amount;
-        *self.accounts.accounts.get_mut(&receiver).unwrap() += amount;
-        
-        self.entries.push(transaction);
+
+        let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
+        let bytes = config.serialize(&transaction).map_err(|_| TransactionError::IoError)?;
+        self.wal.append(&bytes).map_err(|_| TransactionError::IoError)?;
+        self.apply_transaction(transaction);
         Ok(())
     }
 
@@ -139,5 +152,52 @@ impl Ledger {
     
     pub fn get_balance(&self, name: &str) -> Result<u64, TransactionError> {
         self.accounts.accounts.get(name).copied().ok_or(TransactionError::AccountNotFound)
+    }
+
+    pub fn recover(&mut self) -> std::io::Result<()> {
+        let file = std::fs::File::open("ledger.bin")?;
+        let mut reader = std::io::BufReader::new(file);
+
+        let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
+
+        loop {
+            let result: bincode::Result<Transaction> = config.deserialize_from(&mut reader);
+
+            match result {
+                Ok(tx) => {
+                    self.apply_transaction(tx);
+                }
+                Err(e) => {
+                    match *e {
+                        bincode::ErrorKind::Io(ref io_err)
+                        if io_err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                            break;
+                        }
+                        _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                    }
+                }
+            }
+
+        }
+
+        Ok(())
+    }
+
+    pub fn list_transactions(&self) -> Vec<Transaction> {
+        let mut list = Vec::new();
+
+        let file = match fs::File::open("Ledger.bin") {
+            Ok(f) => f,
+            Err(_) => return vec![],
+        };
+
+        let mut reader = BufReader::new(file);
+        let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
+
+        while let Ok(tx) = config.deserialize_from::<_, Transaction>(&mut reader) {
+            list.push(tx);
+        }
+
+        list
     }
 }

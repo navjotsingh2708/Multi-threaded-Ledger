@@ -12,7 +12,8 @@ fn read_cli(command: &str) -> String {
 
 fn main() {
     let (tx, rx) = mpsc::channel();
-    let ledger = Ledger::new();
+    let path = "ledger.log";
+    let ledger = Ledger::new(path).expect("Failed to open Ledger WAL file");
     let handle = thread::spawn(move || {
         ledger.run(rx);
     });
@@ -37,7 +38,9 @@ fn main() {
                 tx.send(multi_threaded_ledger::LedgerRequest::AddTransaction { sender, receiver, amount, timestamp, respond_to: resp_tx }).unwrap();
 
                 match resp_rx.recv().unwrap() {
-                    Ok(_) => println!("Transaction added."),
+                    Ok(_) => {
+                        println!("Transaction added.");
+                },
                     Err(e) => println!("Error: {:?}", e),
                 }
                 
