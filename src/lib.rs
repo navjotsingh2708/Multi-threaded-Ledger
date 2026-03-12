@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs, io::BufReader, sync::mpsc::{Receiver, Sender}};
 use bincode::Options;
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 mod wal;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -10,6 +10,16 @@ pub struct Transaction {
     pub amount: u64,
     pub timestamp: i64,
     pub signature: Signature,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub enum WalEntry {
+    CreateProfile {
+        name: String,
+        key: [u8; 32],
+        balance: u64
+    },
+    Transfer(Transaction),
 }
 
 #[derive(Debug, Clone)]
@@ -39,7 +49,7 @@ pub enum LedgerRequest {
     },
     Profile {
         name: String,
-        key: VerifyingKey,
+        key: [u8; 32],
         balance: u64,
         respond_to: Sender<Result<(), TransactionError>>
     },
@@ -58,6 +68,7 @@ pub enum TransactionError {
     AccountAlreadyExists,
     NotEnoughBalance,
     IoError,
+    InvalidSignature,
 }
 
 impl Transaction {
@@ -113,11 +124,12 @@ impl Ledger {
         let s_bytes = tx.sender.to_bytes();
         let r_bytes = tx.receiver.to_bytes();
 
-        let sender_bal = self.accounts.balances.entry(s_bytes).or_insert(0);
-        *sender_bal = sender_bal.saturating_sub(tx.amount);
-        
-        let rec_bal = self.accounts.balances.entry(r_bytes).or_insert(0);
-        *rec_bal = rec_bal.saturating_add(tx.amount);
+        if let Some(bal) = self.accounts.balances.get_mut(&s_bytes) {
+           *bal = bal.saturating_sub(tx.amount);
+        }
+        if let Some(bal) = self.accounts.balances.get_mut(&r_bytes) {
+            *bal = bal.saturating_add(tx.amount);
+        }
     }
 
     pub fn add(&mut self, sender: String, receiver: String, amount: u64, timestamp: i64, signature: Signature) -> Result<(), TransactionError> {
@@ -143,24 +155,39 @@ impl Ledger {
         let sender_vk = VerifyingKey::from_bytes(sender_key).map_err(|_| TransactionError::IoError)?;
         let receiver_vk = VerifyingKey::from_bytes(receiver_key).map_err(|_| TransactionError::IoError)?;
 
-        let tx = Transaction::new(sender_vk, receiver_vk, amount, timestamp, signature)?;
+        let mut message = Vec::new();
+        message.extend_from_slice(sender.as_bytes());
+        message.extend_from_slice(receiver.as_bytes());
+        message.extend_from_slice(&amount.to_le_bytes());
+        message.extend_from_slice(&timestamp.to_le_bytes());
 
+        sender_vk.verify(&message, &signature).map_err(|_| TransactionError::InvalidSignature)?;
+
+        let tx = Transaction::new(sender_vk, receiver_vk, amount, timestamp, signature)?;
+        let entry = WalEntry::Transfer(tx.clone());
         let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
-        let bytes = config.serialize(&tx).map_err(|_| TransactionError::IoError)?;
+        let bytes = config.serialize(&entry).map_err(|_| TransactionError::IoError)?;
         self.wal.append(&bytes).map_err(|_| TransactionError::IoError)?;
         self.apply_transaction(tx);
         Ok(())
     }
 
-    pub fn profile(&mut self, name: String, balance: u64, key: VerifyingKey) -> Result<(), TransactionError> {
-        let bytes = key.to_bytes();
+    pub fn profile(&mut self, name: String, balance: u64, key: [u8; 32]) -> Result<(), TransactionError> {
+        
         if self.accounts.name_to_key.contains_key(&name) {
             return Err(TransactionError::AccountAlreadyExists);
         }
+        
+        let entry = WalEntry::CreateProfile { name: name.clone(), key, balance };
 
-        self.accounts.name_to_key.insert(name.clone(), bytes);
-        self.accounts.names.insert(bytes, name);
-        self.accounts.balances.insert(bytes, balance);
+        let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
+        let bytes = config.serialize(&entry).map_err(|_| TransactionError::IoError)?;
+        self.wal.append(&bytes).map_err(|_| TransactionError::IoError)?;
+        
+
+        self.accounts.name_to_key.insert(name.clone(), key);
+        self.accounts.names.insert(key, name);
+        self.accounts.balances.insert(key, balance);
 
         Ok(())
     }
@@ -171,17 +198,30 @@ impl Ledger {
     }
 
     pub fn recover(&mut self) -> std::io::Result<()> {
-        let file = std::fs::File::open("ledger.bin")?;
+        let file = std::fs::File::open("ledger.log").map_err(|e| {
+            println!("DEBUG: No ledger.bin found! Creating fresh state.");
+            e
+        })?;
         let mut reader = std::io::BufReader::new(file);
 
         let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
 
         loop {
-            let result: bincode::Result<Transaction> = config.deserialize_from(&mut reader);
+            let result: bincode::Result<WalEntry> = config.deserialize_from(&mut reader);
 
             match result {
-                Ok(tx) => {
-                    self.apply_transaction(tx);
+                Ok(entry) => {
+                    match entry {
+                        WalEntry::CreateProfile { name, key, balance } => {
+                            self.accounts.name_to_key.insert(name.clone(), key);
+                            self.accounts.names.insert(key, name.clone());
+                            self.accounts.balances.insert(key, balance);
+                            println!("DEBUG: Successfully recovered {}", name.clone());
+                        }
+                        WalEntry::Transfer(tx) => {
+                            self.apply_transaction(tx);
+                        }
+                    }
                 }
                 Err(e) => {
                     match *e {

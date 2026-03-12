@@ -1,5 +1,5 @@
 use std::{io::{self, Write}, sync::mpsc, thread};
-use ed25519_dalek::ed25519::signature::SignerMut;
+use ed25519_dalek::{ed25519::signature::SignerMut};
 use multi_threaded_ledger::Ledger;
 mod crypto;
 
@@ -84,7 +84,7 @@ fn main() {
 
                 let (resp_tx, resp_rx) = mpsc::channel();
 
-                tx.send(multi_threaded_ledger::LedgerRequest::Profile { name, balance, key, respond_to: resp_tx }).unwrap();
+                tx.send(multi_threaded_ledger::LedgerRequest::Profile { name, balance, key: key.to_bytes(), respond_to: resp_tx }).unwrap();
 
                 match resp_rx.recv().unwrap() {
                     Ok(_) => println!("Account created."),
