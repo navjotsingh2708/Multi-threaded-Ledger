@@ -80,7 +80,7 @@ fn main() {
                     }
                 };
 
-                let key = crypto::setup(&name)?;
+                let key = crypto::setup(&name).expect("Setup failed");
 
                 let (resp_tx, resp_rx) = mpsc::channel();
 
