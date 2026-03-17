@@ -34,12 +34,26 @@ fn main() {
                         continue;
                     }
                 };
+                
+                let (seq_tx, seq_rx) = mpsc::channel();
+                tx.send(multi_threaded_ledger::LedgerRequest::GetSequence { account: sender.clone(), respond_to: seq_tx }).unwrap();
 
+                let next_sq = match seq_rx.recv().unwrap() {
+                    Ok(seq) => seq,
+                    Err(_) => {
+                        println!("Account not found. Create a profile first.");
+                        return;
+                    }
+                };
+                println!("Next valid sequence for {}: {}", sender, next_sq);
+                
                 let mut message = Vec::new();
+
                 message.extend_from_slice(sender.as_bytes());
                 message.extend_from_slice(receiver.as_bytes());
                 message.extend_from_slice(&amount.to_le_bytes());
                 message.extend_from_slice(&timestamp.to_le_bytes());
+                message.extend_from_slice(&next_sq.to_le_bytes());
 
 
 
@@ -64,7 +78,18 @@ fn main() {
                 let (resp_tx, resp_rx) = mpsc::channel();
                 tx.send(multi_threaded_ledger::LedgerRequest::ListTransaction { respond_to: resp_tx }).unwrap();
                 match resp_rx.recv() {
-                   Ok(l) => println!("{:?}", l),
+                   Ok(transactions) => {
+                        println!("{:-<50}", "");
+                        println!("{:<10} | {:<10} | {:<8} | {:<4}", "Sender", "Receiver", "Amount", "Seq");
+                        println!("{:-<50}", "");
+                        for tx in transactions {
+                            // We use the first 8 bytes of the key as a "short ID"
+                            let s_id = hex::encode(&tx.sender.to_bytes()[..4]);
+                            let r_id = hex::encode(&tx.receiver.to_bytes()[..4]);
+                            println!("{:<10} | {:<10} | {:<8} | {:<4}", s_id, r_id, tx.amount, tx.sequence);
+                        }
+                        println!("{:-<50}", "");
+                    },
                    Err(e) => println!("{e}"), 
                 }
             }

@@ -10,6 +10,7 @@ pub struct Transaction {
     pub amount: u64,
     pub timestamp: i64,
     pub signature: Signature,
+    pub sequence: u64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -17,7 +18,8 @@ pub enum WalEntry {
     CreateProfile {
         name: String,
         key: [u8; 32],
-        balance: u64
+        balance: u64,
+        last_sequence: u64,
     },
     Transfer(Transaction),
 }
@@ -27,6 +29,7 @@ struct Profiles {
     balances: HashMap<[u8; 32], u64>,
     names: HashMap<[u8; 32], String>,
     name_to_key: HashMap<String, [u8; 32]>,
+    sequences: HashMap<[u8; 32], u64>,
 }
 pub struct Ledger {
     accounts: Profiles,
@@ -57,6 +60,10 @@ pub enum LedgerRequest {
         name: String,
         respond_to: Sender<Result<u64, TransactionError>>
     },
+    GetSequence {
+        account: String,
+        respond_to: Sender<Result<u64, TransactionError>>
+    },
     ShutDown,
 }
 
@@ -72,21 +79,21 @@ pub enum TransactionError {
 }
 
 impl Transaction {
-    pub fn new(sender: VerifyingKey, receiver: VerifyingKey, amount: u64, timestamp: i64, signature: Signature) -> Result<Self, TransactionError> {
+    pub fn new(sender: VerifyingKey, receiver: VerifyingKey, amount: u64, timestamp: i64, signature: Signature, sequence: u64) -> Result<Self, TransactionError> {
         if amount == 0 {
             return Err(TransactionError::ZeroAmount)
         }
         if sender == receiver {
             return Err(TransactionError::SameSenderReceiver)
         }
-        Ok(Transaction { sender, receiver, amount, timestamp, signature})
+        Ok(Transaction { sender, receiver, amount, timestamp, signature, sequence })
     }
 }
 
 impl Ledger {
     pub fn new(path: &str) -> std::io::Result<Self> {
         let wal = wal::Wal::new(path)?;
-        Ok(Ledger {accounts: Profiles { balances: HashMap::new(), names: HashMap::new(), name_to_key: HashMap::new() }, wal})
+        Ok(Ledger {accounts: Profiles { balances: HashMap::new(), names: HashMap::new(), name_to_key: HashMap::new(), sequences: HashMap::new() }, wal})
     }
 
     pub fn run(mut self, rx: Receiver<LedgerRequest>) {
@@ -104,12 +111,17 @@ impl Ledger {
                 }
 
                 LedgerRequest::Profile { name, balance, key, respond_to } => {
-                    let result = self.profile(name, balance, key);
+                    let result = self.profile(name, balance, key, 0);
                     let _ = respond_to.send(result);
                 }
                 
                 LedgerRequest::GetBalance { name, respond_to } => {
                     let result = self.get_balance(&name);
+                    let _ = respond_to.send(result);
+                }
+
+                LedgerRequest::GetSequence { account, respond_to } => {
+                    let result = self.get_sequence(&account);
                     let _ = respond_to.send(result);
                 }
 
@@ -130,6 +142,7 @@ impl Ledger {
         if let Some(bal) = self.accounts.balances.get_mut(&r_bytes) {
             *bal = bal.saturating_add(tx.amount);
         }
+        self.accounts.sequences.insert(s_bytes, tx.sequence);
     }
 
     pub fn add(&mut self, sender: String, receiver: String, amount: u64, timestamp: i64, signature: Signature) -> Result<(), TransactionError> {
@@ -152,6 +165,9 @@ impl Ledger {
             return Err(TransactionError::NotEnoughBalance);
         }
 
+        let curr_seq = self.accounts.sequences.get(sender_key).unwrap();
+        let next_seq = curr_seq + 1;
+
         let sender_vk = VerifyingKey::from_bytes(sender_key).map_err(|_| TransactionError::IoError)?;
         let receiver_vk = VerifyingKey::from_bytes(receiver_key).map_err(|_| TransactionError::IoError)?;
 
@@ -160,10 +176,11 @@ impl Ledger {
         message.extend_from_slice(receiver.as_bytes());
         message.extend_from_slice(&amount.to_le_bytes());
         message.extend_from_slice(&timestamp.to_le_bytes());
+        message.extend_from_slice(&next_seq.to_le_bytes());
 
         sender_vk.verify(&message, &signature).map_err(|_| TransactionError::InvalidSignature)?;
 
-        let tx = Transaction::new(sender_vk, receiver_vk, amount, timestamp, signature)?;
+        let tx = Transaction::new(sender_vk, receiver_vk, amount, timestamp, signature, next_seq)?;
         let entry = WalEntry::Transfer(tx.clone());
         let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
         let bytes = config.serialize(&entry).map_err(|_| TransactionError::IoError)?;
@@ -172,13 +189,13 @@ impl Ledger {
         Ok(())
     }
 
-    pub fn profile(&mut self, name: String, balance: u64, key: [u8; 32]) -> Result<(), TransactionError> {
+    pub fn profile(&mut self, name: String, balance: u64, key: [u8; 32], last_sequence: u64) -> Result<(), TransactionError> {
         
         if self.accounts.name_to_key.contains_key(&name) {
             return Err(TransactionError::AccountAlreadyExists);
         }
         
-        let entry = WalEntry::CreateProfile { name: name.clone(), key, balance };
+        let entry = WalEntry::CreateProfile { name: name.clone(), key, balance, last_sequence };
 
         let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
         let bytes = config.serialize(&entry).map_err(|_| TransactionError::IoError)?;
@@ -188,6 +205,7 @@ impl Ledger {
         self.accounts.name_to_key.insert(name.clone(), key);
         self.accounts.names.insert(key, name);
         self.accounts.balances.insert(key, balance);
+        self.accounts.sequences.insert(key, last_sequence);
 
         Ok(())
     }
@@ -212,10 +230,11 @@ impl Ledger {
             match result {
                 Ok(entry) => {
                     match entry {
-                        WalEntry::CreateProfile { name, key, balance } => {
+                        WalEntry::CreateProfile { name, key, balance , last_sequence} => {
                             self.accounts.name_to_key.insert(name.clone(), key);
                             self.accounts.names.insert(key, name.clone());
                             self.accounts.balances.insert(key, balance);
+                            self.accounts.sequences.insert(key, last_sequence);
                             println!("DEBUG: Successfully recovered {}", name.clone());
                         }
                         WalEntry::Transfer(tx) => {
@@ -242,7 +261,7 @@ impl Ledger {
     pub fn list_transactions(&self) -> Vec<Transaction> {
         let mut list = Vec::new();
 
-        let file = match fs::File::open("Ledger.bin") {
+        let file = match fs::File::open("ledger.log") {
             Ok(f) => f,
             Err(_) => return vec![],
         };
@@ -250,10 +269,18 @@ impl Ledger {
         let mut reader = BufReader::new(file);
         let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
 
-        while let Ok(tx) = config.deserialize_from::<_, Transaction>(&mut reader) {
-            list.push(tx);
+        while let Ok(entry) = config.deserialize_from::<_, WalEntry>(&mut reader) {
+            if let WalEntry::Transfer(tx) = entry {
+                list.push(tx);
+            }
         }
 
         list
+    }
+
+    pub fn get_sequence(&self, name: &str) -> Result<u64, TransactionError> {
+        let key = self.accounts.name_to_key.get(name).ok_or(TransactionError::AccountNotFound)?;
+        let seq = self.accounts.sequences.get(key).copied().ok_or(TransactionError::AccountNotFound)?;
+        Ok(seq + 1)
     }
 }
