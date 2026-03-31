@@ -1,18 +1,18 @@
-use std::{io::{self, Write}, sync::mpsc, thread};
+use std::{error::Error, io::{self, Write}, sync::mpsc, thread};
 use ed25519_dalek::{ed25519::signature::SignerMut};
-use multi_threaded_ledger::Ledger;
+use multi_threaded_ledger::{Ledger, TransactionError};
 mod crypto;
 
-fn read_cli(command: &str) -> String {
+fn read_cli(command: &str) -> Result<String, Box<dyn Error>> {
     print!("{command}");
-    io::stdout().flush().unwrap();
+    io::stdout().flush()?;
     let mut c = String::new();
-    io::stdin().read_line(&mut c).unwrap();
+    io::stdin().read_line(&mut c)?;
     let c = c.trim().to_string();
-    c
+    Ok(c)
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let (tx, rx) = mpsc::channel();
     let path = "ledger.log";
     let ledger = Ledger::new(path).expect("Failed to open Ledger WAL file");
@@ -20,12 +20,12 @@ fn main() {
         ledger.run(rx);
     });
     loop {
-        let input = read_cli("> ");
+        let input = read_cli("> ")?;
         match input.as_str() {
             "1" | "add" => {
-                let sender = read_cli("Sender - ");
-                let amount = read_cli("Amount - ");
-                let receiver = read_cli("Receiver - ");
+                let sender = read_cli("Sender - ")?;
+                let amount = read_cli("Amount - ")?;
+                let receiver = read_cli("Receiver - ")?;
                 let timestamp = chrono::Utc::now().timestamp();
                 let amount: u64 = match amount.parse::<u64>() {
                     Ok(v) => v,
@@ -36,15 +36,9 @@ fn main() {
                 };
                 
                 let (seq_tx, seq_rx) = mpsc::channel();
-                tx.send(multi_threaded_ledger::LedgerRequest::GetSequence { account: sender.clone(), respond_to: seq_tx }).unwrap();
+                tx.send(multi_threaded_ledger::LedgerRequest::GetSequence { account: sender.clone(), respond_to: seq_tx })?;
 
-                let next_sq = match seq_rx.recv().unwrap() {
-                    Ok(seq) => seq,
-                    Err(_) => {
-                        println!("Account not found. Create a profile first.");
-                        return;
-                    }
-                };
+                let next_sq = seq_rx.recv()?.map_err(|_| TransactionError::AccountNotFound)?;
                 println!("Next valid sequence for {}: {}", sender, next_sq);
                 
                 let mut message = Vec::new();
@@ -63,9 +57,9 @@ fn main() {
                 
                 let (resp_tx, resp_rx) = mpsc::channel();
 
-                tx.send(multi_threaded_ledger::LedgerRequest::AddTransaction { sender, receiver, amount, timestamp, signature: signature, respond_to: resp_tx }).unwrap();
+                tx.send(multi_threaded_ledger::LedgerRequest::AddTransaction { sender, receiver, amount, timestamp, signature: signature, respond_to: resp_tx })?;
 
-                match resp_rx.recv().unwrap() {
+                match resp_rx.recv()? {
                     Ok(_) => {
                         println!("Transaction added.");
                 },
@@ -75,9 +69,16 @@ fn main() {
             }
 
             "2" | "list" => {
+                let input = read_cli("Enter Sender's name (press enter for all): ")?;
+                let sender = if input.trim().is_empty() {
+                    None
+                } else {
+                    Some(input.trim().to_string())
+                };
+
                 let (resp_tx, resp_rx) = mpsc::channel();
-                tx.send(multi_threaded_ledger::LedgerRequest::ListTransaction { respond_to: resp_tx }).unwrap();
-                match resp_rx.recv() {
+                tx.send(multi_threaded_ledger::LedgerRequest::ListTransaction { sender, respond_to: resp_tx })?;
+                match resp_rx.recv().map_err(|_| "Channel error".to_string()).and_then(|res| res.map_err(|e| e.to_string())) {
                    Ok(transactions) => {
                         println!("{:-<50}", "");
                         println!("{:<10} | {:<10} | {:<8} | {:<4}", "Sender", "Receiver", "Amount", "Seq");
@@ -95,8 +96,8 @@ fn main() {
             }
 
             "3" | "profile" => {
-                let name = read_cli("Name - ");
-                let balance = read_cli("balance - ");
+                let name = read_cli("Name - ")?;
+                let balance = read_cli("balance - ")?;
                 let balance:u64 = match balance.parse::<u64>() {
                     Ok(b) => b,
                     Err(_) => {
@@ -109,32 +110,41 @@ fn main() {
 
                 let (resp_tx, resp_rx) = mpsc::channel();
 
-                tx.send(multi_threaded_ledger::LedgerRequest::Profile { name, balance, key: key.to_bytes(), respond_to: resp_tx }).unwrap();
+                tx.send(multi_threaded_ledger::LedgerRequest::Profile { name, balance, key: key.to_bytes(), respond_to: resp_tx })?;
 
-                match resp_rx.recv().unwrap() {
+                match resp_rx.recv()? {
                     Ok(_) => println!("Account created."),
                     Err(e) => println!("Error: {:?}", e),
                 }
             }
 
             "4" | "balance" => {
-                let name = read_cli("Name - ");
+                let name = read_cli("Name - ")?;
                 let (resp_tx, resp_rx) = mpsc::channel();
-                tx.send(multi_threaded_ledger::LedgerRequest::GetBalance { name, respond_to: resp_tx }).unwrap();
-                match resp_rx.recv().unwrap() {
+                tx.send(multi_threaded_ledger::LedgerRequest::GetBalance { name, respond_to: resp_tx })?;
+                match resp_rx.recv()? {
                     Ok(b) => println!("Balance - {b}"),
                     Err(e) => println!("Error: {:?}", e),
                 }
             }
 
             "5" | "shutdown" => {
-                tx.send(multi_threaded_ledger::LedgerRequest::ShutDown).unwrap();
+                tx.send(multi_threaded_ledger::LedgerRequest::ShutDown)?;
                 break;
 
             }
             _ => println!("Unknown command.")
         }
     }
-    handle.join().unwrap();
+    handle.join().map_err(|e| {
+        if let Some(msg) = e.downcast_ref::<&str>() {
+            format!("Thread panicked: {msg}")
+        } else if let Some(msg) = e.downcast_ref::<String>() {
+            format!("Thread panicked: {msg}")
+        } else {
+            "Thread panicked with an unknown error".to_string()
+        }
+    })?;
     println!("Ledger shut down cleanly.");
+    Ok(())
 }

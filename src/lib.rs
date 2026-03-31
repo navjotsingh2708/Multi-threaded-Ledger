@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fs, io::BufReader, sync::mpsc::{Receiver, Sender}};
 use bincode::Options;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use std::fmt;
 mod wal;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -48,7 +49,8 @@ pub enum LedgerRequest {
         respond_to: Sender<Result<(), TransactionError>>
     },
     ListTransaction {
-        respond_to: Sender<Vec<Transaction>>
+        sender: Option<String>,
+        respond_to: Sender<Result<Vec<Transaction>, TransactionError>>
     },
     Profile {
         name: String,
@@ -78,6 +80,21 @@ pub enum TransactionError {
     InvalidSignature,
 }
 
+impl fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroAmount => write!(f, "Transaction amount must be greater than zero."),
+            Self::SameSenderReceiver => write!(f, "Sender and receiver cannot be the same account."),
+            Self::AccountNotFound => write!(f, "The specified account was not found in the ledger."),
+            Self::AccountAlreadyExists => write!(f, "An account with this name already exists."),
+            Self::NotEnoughBalance => write!(f, "Insufficient funds to complete this transaction."),
+            Self::IoError => write!(f, "A disk I/O error occurred while accessing the ledger log."),
+            Self::InvalidSignature => write!(f, "Cryptographic signature verification failed."),
+        }
+    }
+}
+impl std::error::Error for TransactionError {}
+
 impl Transaction {
     pub fn new(sender: VerifyingKey, receiver: VerifyingKey, amount: u64, timestamp: i64, signature: Signature, sequence: u64) -> Result<Self, TransactionError> {
         if amount == 0 {
@@ -105,9 +122,17 @@ impl Ledger {
                     let _ = respond_to.send(result);
                 }
 
-                LedgerRequest::ListTransaction { respond_to } => {
-                    let result = self.list_transactions();
-                    let _ = respond_to.send(result);
+                LedgerRequest::ListTransaction { sender, respond_to } => {
+                    match sender {
+                        Some(name) => {
+                            let result = self.find_by_sender(&name);
+                            let _ = respond_to.send(result);
+                        },
+                        None => {
+                            let result = self.list_transactions();
+                            let _ = respond_to.send(Ok(result));
+                        }
+                    }
                 }
 
                 LedgerRequest::Profile { name, balance, key, respond_to } => {
@@ -165,7 +190,7 @@ impl Ledger {
             return Err(TransactionError::NotEnoughBalance);
         }
 
-        let curr_seq = self.accounts.sequences.get(sender_key).unwrap();
+        let curr_seq = self.accounts.sequences.get(sender_key).ok_or(TransactionError::AccountNotFound)?;
         let next_seq = curr_seq + 1;
 
         let sender_vk = VerifyingKey::from_bytes(sender_key).map_err(|_| TransactionError::IoError)?;
@@ -232,10 +257,10 @@ impl Ledger {
                     match entry {
                         WalEntry::CreateProfile { name, key, balance , last_sequence} => {
                             self.accounts.name_to_key.insert(name.clone(), key);
-                            self.accounts.names.insert(key, name.clone());
+                            self.accounts.names.insert(key, name);
                             self.accounts.balances.insert(key, balance);
                             self.accounts.sequences.insert(key, last_sequence);
-                            println!("DEBUG: Successfully recovered {}", name.clone());
+                            // println!("DEBUG: Successfully recovered {}", name.clone());
                         }
                         WalEntry::Transfer(tx) => {
                             self.apply_transaction(tx);
@@ -282,5 +307,26 @@ impl Ledger {
         let key = self.accounts.name_to_key.get(name).ok_or(TransactionError::AccountNotFound)?;
         let seq = self.accounts.sequences.get(key).copied().ok_or(TransactionError::AccountNotFound)?;
         Ok(seq + 1)
+    }
+
+    pub fn find_by_sender(&self, name: &str) -> Result<Vec<Transaction>, TransactionError> {
+        let key = self.accounts.name_to_key.get(name).ok_or(TransactionError::AccountNotFound)?;
+        let mut list = Vec::new();
+        let file = match fs::File::open("ledger.log") {
+            Ok(f) => f,
+            Err(_) => return Err(TransactionError::IoError),
+        };
+        let mut reader = BufReader::new(file);
+        let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
+
+        while let Ok(e) = config.deserialize_from::<_, WalEntry>(&mut reader) {
+            if let WalEntry::Transfer(tx) = e {
+                if tx.sender.to_bytes() == *key {
+                    list.push(tx);
+                }
+            }
+        }
+
+        Ok(list)
     }
 }
