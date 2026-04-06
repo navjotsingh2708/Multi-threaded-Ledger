@@ -14,7 +14,7 @@ pub fn setup(name: &str) -> std::io::Result<VerifyingKey> {
     Ok(verifying_key)
 }
 
-pub fn load_key(name: &str) -> Result<SigningKey, String> {
+pub fn load_private_key(name: &str) -> Result<SigningKey, String> {
     let path = format!("{name}.key");
 
     if !Path::new(&path).exists() {
@@ -23,4 +23,17 @@ pub fn load_key(name: &str) -> Result<SigningKey, String> {
     let key_bytes = fs::read(path).map_err(|e| format!("Failed to read key file: {e}"))?;
     let bytes: [u8;32] = key_bytes.try_into().map_err(|_| "Key File is corrupted (not 32 bytes)".to_string())?;
     Ok(SigningKey::from_bytes(&bytes))
+}
+
+pub fn load_public_key(name: &str) -> Result<VerifyingKey, String> {
+    let path = format!("{name}.key");
+
+    if !Path::new(&path).exists() {
+        return Err(format!("No wallet found for '{name}'. Did you build your profile?"));
+    }
+    let key_bytes = fs::read(path).map_err(|e| format!("Failed to read key file: {e}"))?;
+    let bytes: [u8;32] = key_bytes.try_into().map_err(|_| "Key File is corrupted (not 32 bytes)".to_string())?;
+    let signingkey = SigningKey::from_bytes(&bytes);
+    let publickey = signingkey.verifying_key();
+    Ok(publickey)
 }

@@ -1,7 +1,10 @@
-use std::{error::Error, io::{self, Write}, sync::mpsc, thread};
+use std::{error::Error, io::{self, Write}, thread};
 use ed25519_dalek::{ed25519::signature::SignerMut};
-use multi_threaded_ledger::{Ledger, TransactionError};
-mod crypto;
+use multi_threaded_ledger::{Ledger};
+use multi_threaded_ledger::TransactionError;
+use multi_threaded_ledger::crypto::{load_private_key, load_public_key, setup};
+use crossbeam::channel::{unbounded};
+use multi_threaded_ledger::validator::{VerificationTask, WorkerPool};
 
 fn read_cli(command: &str) -> Result<String, Box<dyn Error>> {
     print!("{command}");
@@ -13,11 +16,13 @@ fn read_cli(command: &str) -> Result<String, Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let (tx, rx) = mpsc::channel();
+    let pool = WorkerPool::new(8);
+    let (verified_tx, verified_rx) = crossbeam::channel::bounded(1024);
+    let (tx, rx) = unbounded::<multi_threaded_ledger::LedgerRequest>();
     let path = "ledger.log";
     let ledger = Ledger::new(path).expect("Failed to open Ledger WAL file");
     let handle = thread::spawn(move || {
-        ledger.run(rx);
+        ledger.run(rx, verified_rx);
     });
     loop {
         let input = read_cli("> ")?;
@@ -26,20 +31,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let sender = read_cli("Sender - ")?;
                 let amount = read_cli("Amount - ")?;
                 let receiver = read_cli("Receiver - ")?;
+                let sequence = read_cli("Sequence - ")?;
                 let timestamp = chrono::Utc::now().timestamp();
                 let amount: u64 = match amount.parse::<u64>() {
                     Ok(v) => v,
                     Err(_) => {
-                        println!("Invalid amount");
+                        println!("\nInvalid amount");
+                        continue;
+                    }
+                };
+                let sequence: u64 = match sequence.parse::<u64>() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        println!("\nInvalid amount");
                         continue;
                     }
                 };
                 
-                let (seq_tx, seq_rx) = mpsc::channel();
+                let (seq_tx, seq_rx) = crossbeam::channel::bounded::<Result<u64, TransactionError>>(1);
                 tx.send(multi_threaded_ledger::LedgerRequest::GetSequence { account: sender.clone(), respond_to: seq_tx })?;
 
                 let next_sq = seq_rx.recv()?.map_err(|_| TransactionError::AccountNotFound)?;
-                println!("Next valid sequence for {}: {}", sender, next_sq);
+                println!("\nNext valid sequence for {}: {}", sender, next_sq);
                 
                 let mut message = Vec::new();
 
@@ -47,24 +60,41 @@ fn main() -> Result<(), Box<dyn Error>> {
                 message.extend_from_slice(receiver.as_bytes());
                 message.extend_from_slice(&amount.to_le_bytes());
                 message.extend_from_slice(&timestamp.to_le_bytes());
-                message.extend_from_slice(&next_sq.to_le_bytes());
+                message.extend_from_slice(&sequence.to_le_bytes());
 
 
 
-                let mut key = crypto::load_key(&sender).expect("Failed to load wallet");
+                let mut key = load_private_key(&sender).expect("Failed to load wallet");
 
                 let signature = key.sign(&message);
+                let sender_pubkey = load_public_key(&sender)?;
+                let sender_pubkey = sender_pubkey.to_bytes();
+
+                let task = VerificationTask {
+                    sender_name: sender.clone(),
+                    receiver_name: receiver,
+                    amount,
+                    timestamp,
+                    signature,
+                    sequence,
+                    sender_pubkey,
+                    respond_to: verified_tx.clone(),
+                };
+
+                pool.sender.send(task).expect("\nWorket pool is down");
+                println!("\nTransaction submitted for verification.");
                 
-                let (resp_tx, resp_rx) = mpsc::channel();
+                // let (resp_tx, resp_rx) = mpsc::channel();
 
-                tx.send(multi_threaded_ledger::LedgerRequest::AddTransaction { sender, receiver, amount, timestamp, signature: signature, respond_to: resp_tx })?;
+                // tx.send(multi_threaded_ledger::LedgerRequest::AddTransaction { sender, receiver, amount, timestamp, signature: signature, sequence, sender_pubkey, respond_to: resp_tx })?;
 
-                match resp_rx.recv()? {
-                    Ok(_) => {
-                        println!("Transaction added.");
-                },
-                    Err(e) => println!("Error: {:?}", e),
-                }
+                // match resp_rx.recv()? {
+                //     Ok(_) => {
+                //         println!("Transaction added.");
+                // },
+                //     Err(e) => println!("Error: {:?}", e),
+                // }
+
                 
             }
 
@@ -76,9 +106,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Some(input.trim().to_string())
                 };
 
-                let (resp_tx, resp_rx) = mpsc::channel();
+                let (resp_tx, resp_rx) = crossbeam::channel::bounded(1);
                 tx.send(multi_threaded_ledger::LedgerRequest::ListTransaction { sender, respond_to: resp_tx })?;
-                match resp_rx.recv().map_err(|_| "Channel error".to_string()).and_then(|res| res.map_err(|e| e.to_string())) {
+                match resp_rx.recv().map_err(|_| "\nChannel error".to_string()).and_then(|res| res.map_err(|e| e.to_string())) {
                    Ok(transactions) => {
                         println!("{:-<50}", "");
                         println!("{:<10} | {:<10} | {:<8} | {:<4}", "Sender", "Receiver", "Amount", "Seq");
@@ -101,30 +131,30 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let balance:u64 = match balance.parse::<u64>() {
                     Ok(b) => b,
                     Err(_) => {
-                        println!("Invalid balance");
+                        println!("\nInvalid balance");
                         continue;
                     }
                 };
 
-                let key = crypto::setup(&name).expect("Setup failed");
+                let key = setup(&name).expect("\nSetup failed");
 
-                let (resp_tx, resp_rx) = mpsc::channel();
+                let (resp_tx, resp_rx) = crossbeam::channel::bounded(1);
 
                 tx.send(multi_threaded_ledger::LedgerRequest::Profile { name, balance, key: key.to_bytes(), respond_to: resp_tx })?;
 
                 match resp_rx.recv()? {
-                    Ok(_) => println!("Account created."),
-                    Err(e) => println!("Error: {:?}", e),
+                    Ok(_) => println!("\nAccount created."),
+                    Err(e) => println!("\nError: {:?}", e),
                 }
             }
 
             "4" | "balance" => {
                 let name = read_cli("Name - ")?;
-                let (resp_tx, resp_rx) = mpsc::channel();
+                let (resp_tx, resp_rx) = crossbeam::channel::bounded(1);
                 tx.send(multi_threaded_ledger::LedgerRequest::GetBalance { name, respond_to: resp_tx })?;
                 match resp_rx.recv()? {
                     Ok(b) => println!("Balance - {b}"),
-                    Err(e) => println!("Error: {:?}", e),
+                    Err(e) => println!("\nError: {:?}", e),
                 }
             }
 
@@ -133,16 +163,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 break;
 
             }
-            _ => println!("Unknown command.")
+            _ => println!("\nUnknown command.")
         }
     }
     handle.join().map_err(|e| {
         if let Some(msg) = e.downcast_ref::<&str>() {
             format!("Thread panicked: {msg}")
         } else if let Some(msg) = e.downcast_ref::<String>() {
-            format!("Thread panicked: {msg}")
+            format!("\nThread panicked: {msg}")
         } else {
-            "Thread panicked with an unknown error".to_string()
+            "\nThread panicked with an unknown error".to_string()
         }
     })?;
     println!("Ledger shut down cleanly.");

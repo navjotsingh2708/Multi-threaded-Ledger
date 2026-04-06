@@ -1,7 +1,11 @@
-use std::{collections::HashMap, fs, io::BufReader, sync::mpsc::{Receiver, Sender}};
+use std::{collections::{BTreeMap, HashMap}, fs, io::BufReader};
+use ed25519_dalek::{Signature, VerifyingKey};
+use crossbeam::{channel::{Receiver, Sender, select}};
+use crate::validator::VerificationTask;
 use bincode::Options;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::fmt;
+pub mod validator;
+pub mod crypto;
 mod wal;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -35,19 +39,22 @@ struct Profiles {
 pub struct Ledger {
     accounts: Profiles,
     wal: wal::Wal,
+    pending_queue: HashMap<[u8; 32], BTreeMap<u64, VerificationTask>>,
 }
 
 #[derive(Debug)]
 
 pub enum LedgerRequest {
-    AddTransaction {
-        sender: String,
-        receiver: String,
-        amount: u64,
-        timestamp: i64,
-        signature: Signature,
-        respond_to: Sender<Result<(), TransactionError>>
-    },
+    // AddTransaction {
+    //     sender: String,
+    //     receiver: String,
+    //     amount: u64,
+    //     timestamp: i64,
+    //     signature: Signature,
+    //     sequence: u64,
+    //     sender_pubkey: [u8; 32],
+    //     respond_to: Sender<Result<(), TransactionError>>
+    // },
     ListTransaction {
         sender: Option<String>,
         respond_to: Sender<Result<Vec<Transaction>, TransactionError>>
@@ -78,18 +85,22 @@ pub enum TransactionError {
     NotEnoughBalance,
     IoError,
     InvalidSignature,
+    SequenceTooFar,
+    QueueFull,
 }
 
 impl fmt::Display for TransactionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ZeroAmount => write!(f, "Transaction amount must be greater than zero."),
-            Self::SameSenderReceiver => write!(f, "Sender and receiver cannot be the same account."),
-            Self::AccountNotFound => write!(f, "The specified account was not found in the ledger."),
-            Self::AccountAlreadyExists => write!(f, "An account with this name already exists."),
-            Self::NotEnoughBalance => write!(f, "Insufficient funds to complete this transaction."),
-            Self::IoError => write!(f, "A disk I/O error occurred while accessing the ledger log."),
-            Self::InvalidSignature => write!(f, "Cryptographic signature verification failed."),
+            Self::ZeroAmount => write!(f, "\nTransaction amount must be greater than zero."),
+            Self::SameSenderReceiver => write!(f, "\nSender and receiver cannot be the same account."),
+            Self::AccountNotFound => write!(f, "\nThe specified account was not found in the ledger."),
+            Self::AccountAlreadyExists => write!(f, "\nAn account with this name already exists."),
+            Self::NotEnoughBalance => write!(f, "\nInsufficient funds to complete this transaction."),
+            Self::IoError => write!(f, "\nA disk I/O error occurred while accessing the ledger log."),
+            Self::InvalidSignature => write!(f, "\nCryptographic signature verification failed."),
+            Self::SequenceTooFar => write!(f, "\nTransaction Sequence is too ahead in future."),
+            Self::QueueFull => write!(f, "\nYour queue of future transactions is full.")
         }
     }
 }
@@ -110,56 +121,120 @@ impl Transaction {
 impl Ledger {
     pub fn new(path: &str) -> std::io::Result<Self> {
         let wal = wal::Wal::new(path)?;
-        Ok(Ledger {accounts: Profiles { balances: HashMap::new(), names: HashMap::new(), name_to_key: HashMap::new(), sequences: HashMap::new() }, wal})
+        Ok(Ledger {accounts: Profiles { balances: HashMap::new(), names: HashMap::new(), name_to_key: HashMap::new(), sequences: HashMap::new() }, wal, pending_queue: HashMap::new()})
     }
 
-    pub fn run(mut self, rx: Receiver<LedgerRequest>) {
-        self.recover().ok();
-        while let Ok(msg) = rx.recv() {
-            match msg {
-                LedgerRequest::AddTransaction { sender, receiver, amount, timestamp, signature, respond_to } => {
-                    let result = self.add(sender, receiver, amount, timestamp, signature);
-                    let _ = respond_to.send(result);
-                }
+    pub fn set_test_account(&mut self, name: String, key: [u8; 32], balance: u64) {
+        self.accounts.name_to_key.insert(name.clone(), key);
+        self.accounts.names.insert(key, name);
+        self.accounts.balances.insert(key, balance);
+        self.accounts.sequences.insert(key, 0);
+    }
 
-                LedgerRequest::ListTransaction { sender, respond_to } => {
-                    match sender {
-                        Some(name) => {
-                            let result = self.find_by_sender(&name);
-                            let _ = respond_to.send(result);
-                        },
-                        None => {
-                            let result = self.list_transactions();
-                            let _ = respond_to.send(Ok(result));
+    pub fn reset_test_sequence(&mut self, key: &[u8; 32]) {
+        self.accounts.sequences.insert(*key, 0);
+    }
+
+    pub fn run(mut self, cli_rx: Receiver<LedgerRequest>, verified_tx: Receiver<Result<VerificationTask, TransactionError>>) {
+        self.recover().ok();
+
+        loop {
+            select! {
+                recv(cli_rx) -> msg => {
+                    match msg {
+                        Ok(LedgerRequest::ListTransaction { sender, respond_to }) => {
+                            match sender {
+                                Some(name) => {
+                                    let result = self.find_by_sender(&name);
+                                    let _ = respond_to.send(result);
+                                },
+                                None => {
+                                    let result = self.list_transactions();
+                                    let _ = respond_to.send(Ok(result));
+                                }
+                            }
                         }
+            
+                        Ok(LedgerRequest::Profile { name, balance, key, respond_to }) => {
+                            let result = self.profile(name, balance, key, 0);
+                            let _ = respond_to.send(result);
+                        }
+                        
+                        Ok(LedgerRequest::GetBalance { name, respond_to }) => {
+                            let result = self.get_balance(&name);
+                            let _ = respond_to.send(result);
+                        }
+            
+                        Ok(LedgerRequest::GetSequence { account, respond_to }) => {
+                            let result = self.get_sequence(&account);
+                            let _ = respond_to.send(result);
+                        }
+            
+                        Ok(LedgerRequest::ShutDown) => {
+                            break;
+                        }
+                        _ => {break}
                     }
                 }
-
-                LedgerRequest::Profile { name, balance, key, respond_to } => {
-                    let result = self.profile(name, balance, key, 0);
-                    let _ = respond_to.send(result);
-                }
-                
-                LedgerRequest::GetBalance { name, respond_to } => {
-                    let result = self.get_balance(&name);
-                    let _ = respond_to.send(result);
-                }
-
-                LedgerRequest::GetSequence { account, respond_to } => {
-                    let result = self.get_sequence(&account);
-                    let _ = respond_to.send(result);
-                }
-
-                LedgerRequest::ShutDown => {
-                    break;
+                recv(verified_tx) -> task_res => {
+                    if let Ok(result) = task_res {
+                        match result {
+                            Ok(task) => {
+                                if let Err(e) = self.add(task) {
+                                    eprintln!("Transaction failed: {:?}", e);
+                                }
+                            },
+                            Err(e) => eprintln!("Worker rejected transaction: {:?}", e),
+                        }
+                    }
                 }
             }
         }
     }
 
+    fn process_single_task(&mut self, task: VerificationTask) -> Result<(), TransactionError> {
+        
+        let sender_bal = self.accounts.balances.get(&task.sender_pubkey).ok_or(TransactionError::AccountNotFound)?;
+
+        if task.amount > *sender_bal {
+            return Err(TransactionError::NotEnoughBalance);
+        }
+
+        let receiver_key = self
+            .accounts
+            .name_to_key
+            .get(&task.receiver_name)
+            .ok_or(TransactionError::AccountNotFound)?;
+        let receiver_vk = VerifyingKey::from_bytes(receiver_key).map_err(|_| TransactionError::IoError)?;
+
+
+        let tx = Transaction {
+            sender: VerifyingKey::from_bytes(&task.sender_pubkey).unwrap(),
+            receiver: receiver_vk,
+            amount: task.amount,
+            timestamp: task.timestamp,
+            signature: task.signature,
+            sequence: task.sequence,
+        };
+
+        let entry = WalEntry::Transfer(tx.clone());
+        let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
+        let bytes = config.serialize(&entry).map_err(|_| TransactionError::IoError)?;
+        self.wal.append(&bytes).map_err(|_| TransactionError::IoError)?;
+        self.apply_transaction(tx);
+
+        Ok(())
+    }
+
     fn apply_transaction(&mut self, tx: Transaction) {
         let s_bytes = tx.sender.to_bytes();
         let r_bytes = tx.receiver.to_bytes();
+        
+        let current_seq = self.accounts.sequences.get(&s_bytes).copied().unwrap_or(0);
+        if tx.sequence <= current_seq {
+            println!("DEBUG: Skipping duplicate or old transaction seq: {}", tx.sequence);
+            return; 
+        }
 
         if let Some(bal) = self.accounts.balances.get_mut(&s_bytes) {
            *bal = bal.saturating_sub(tx.amount);
@@ -170,47 +245,58 @@ impl Ledger {
         self.accounts.sequences.insert(s_bytes, tx.sequence);
     }
 
-    pub fn add(&mut self, sender: String, receiver: String, amount: u64, timestamp: i64, signature: Signature) -> Result<(), TransactionError> {
+    pub fn add(&mut self, task: VerificationTask) -> Result<(), TransactionError> {
+        let current_seq = self.accounts.sequences.get(&task.sender_pubkey).copied().unwrap_or(0);
         
-        let sender_key = self
-            .accounts
-            .name_to_key
-            .get(&sender)
-            .ok_or(TransactionError::AccountNotFound)?;
-
-        let receiver_key = self
-            .accounts
-            .name_to_key
-            .get(&receiver)
-            .ok_or(TransactionError::AccountNotFound)?;
-
-        let sender_bal = self.accounts.balances.get(sender_key).ok_or(TransactionError::AccountNotFound)?;
-
-        if amount > *sender_bal {
-            return Err(TransactionError::NotEnoughBalance);
+        if task.sequence <= current_seq {
+            println!("DEBUG: Droping old seq: {}", task.sequence);
+            return Ok(());
         }
 
-        let curr_seq = self.accounts.sequences.get(sender_key).ok_or(TransactionError::AccountNotFound)?;
-        let next_seq = curr_seq + 1;
+        let max_future_gap = 50;
+        if task.sequence > current_seq + max_future_gap {
+            return Err(TransactionError::SequenceTooFar);
+        }
 
-        let sender_vk = VerifyingKey::from_bytes(sender_key).map_err(|_| TransactionError::IoError)?;
-        let receiver_vk = VerifyingKey::from_bytes(receiver_key).map_err(|_| TransactionError::IoError)?;
+        if task.sequence > current_seq + 1 {
+            let user_queue = self.pending_queue.entry(task.sender_pubkey).or_default();
+            if user_queue.contains_key(&task.sequence) {
+                println!("\nDEBUG: Dropping duplicate pending sequence: {}", task.sequence);
+                return Ok(()); // Drop it. We already have a candidate for this sequence.
+            }
+            if user_queue.len() >= 20 {
+                return Err(TransactionError::QueueFull);
+            }
+            user_queue.insert(task.sequence, task);
+            return Ok(());
+        }
 
-        let mut message = Vec::new();
-        message.extend_from_slice(sender.as_bytes());
-        message.extend_from_slice(receiver.as_bytes());
-        message.extend_from_slice(&amount.to_le_bytes());
-        message.extend_from_slice(&timestamp.to_le_bytes());
-        message.extend_from_slice(&next_seq.to_le_bytes());
+        if task.sequence == current_seq + 1 {
+            let pub_key = task.sender_pubkey;
+            self.process_single_task(task)?;
 
-        sender_vk.verify(&message, &signature).map_err(|_| TransactionError::InvalidSignature)?;
+            loop {
+                let next_expected_seq = self.accounts.sequences.get(&pub_key).copied().unwrap_or(0) + 1;
+                let next_task = {
+                    if let Some(queue) = self.pending_queue.get_mut(&pub_key) {
+                        queue.remove(&next_expected_seq)
+                    } else {
+                        None
+                    }
+                };
 
-        let tx = Transaction::new(sender_vk, receiver_vk, amount, timestamp, signature, next_seq)?;
-        let entry = WalEntry::Transfer(tx.clone());
-        let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
-        let bytes = config.serialize(&entry).map_err(|_| TransactionError::IoError)?;
-        self.wal.append(&bytes).map_err(|_| TransactionError::IoError)?;
-        self.apply_transaction(tx);
+                match next_task {
+                    Some(t) => {
+                        if let Err(e) = self.process_single_task(t) {
+                            println!("\nDEBUG: Pending transaction failed execution: {:?}", e);
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -242,7 +328,7 @@ impl Ledger {
 
     pub fn recover(&mut self) -> std::io::Result<()> {
         let file = std::fs::File::open("ledger.log").map_err(|e| {
-            println!("DEBUG: No ledger.bin found! Creating fresh state.");
+            println!("\nDEBUG: No ledger.log found! Creating fresh state.");
             e
         })?;
         let mut reader = std::io::BufReader::new(file);
