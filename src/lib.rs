@@ -1,11 +1,13 @@
 use std::{collections::{BTreeMap, HashMap}, fs, io::BufReader};
 use ed25519_dalek::{Signature, VerifyingKey};
 use crossbeam::{channel::{Receiver, Sender, select}};
+use serde::{Deserialize, Serialize};
 use crate::validator::VerificationTask;
 use bincode::Options;
 use std::fmt;
 pub mod validator;
 pub mod crypto;
+pub mod threadpool;
 mod wal;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -43,18 +45,7 @@ pub struct Ledger {
 }
 
 #[derive(Debug)]
-
 pub enum LedgerRequest {
-    // AddTransaction {
-    //     sender: String,
-    //     receiver: String,
-    //     amount: u64,
-    //     timestamp: i64,
-    //     signature: Signature,
-    //     sequence: u64,
-    //     sender_pubkey: [u8; 32],
-    //     respond_to: Sender<Result<(), TransactionError>>
-    // },
     ListTransaction {
         sender: Option<String>,
         respond_to: Sender<Result<Vec<Transaction>, TransactionError>>
@@ -74,6 +65,21 @@ pub enum LedgerRequest {
         respond_to: Sender<Result<u64, TransactionError>>
     },
     ShutDown,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ClientRequest {
+    Transfer(VerificationTask),
+    CreateProfile {name: String, balance: u64, key: [u8; 32]},
+    GetBalance {name: String},
+    ShutDown,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ServerResponse {
+    Success,
+    Balance(u64),
+    Error(String),
 }
 
 #[derive(Debug)]
@@ -135,7 +141,7 @@ impl Ledger {
         self.accounts.sequences.insert(*key, 0);
     }
 
-    pub fn run(mut self, cli_rx: Receiver<LedgerRequest>, verified_tx: Receiver<Result<VerificationTask, TransactionError>>) {
+    pub fn run(mut self, cli_rx: Receiver<LedgerRequest>, verified_rx: Receiver<Result<VerificationTask, TransactionError>>) {
         self.recover().ok();
 
         loop {
@@ -171,12 +177,17 @@ impl Ledger {
                         }
             
                         Ok(LedgerRequest::ShutDown) => {
+                            println!("Ledger shutting down...");
+                            return;
+                        }
+                        Err(e) => {
+                            eprintln!("Ledger channel disconnected: {:?}", e);
                             break;
                         }
-                        _ => {break}
+                        _ => {eprintln!("Ledger received unexpected request");}
                     }
                 }
-                recv(verified_tx) -> task_res => {
+                recv(verified_rx) -> task_res => {
                     if let Ok(result) = task_res {
                         match result {
                             Ok(task) => {

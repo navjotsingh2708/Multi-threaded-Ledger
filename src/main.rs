@@ -78,23 +78,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     signature,
                     sequence,
                     sender_pubkey,
-                    respond_to: verified_tx.clone(),
+                    respond_to: Some(verified_tx.clone()),
                 };
 
                 pool.sender.send(task).expect("\nWorket pool is down");
                 println!("\nTransaction submitted for verification.");
-                
-                // let (resp_tx, resp_rx) = mpsc::channel();
-
-                // tx.send(multi_threaded_ledger::LedgerRequest::AddTransaction { sender, receiver, amount, timestamp, signature: signature, sequence, sender_pubkey, respond_to: resp_tx })?;
-
-                // match resp_rx.recv()? {
-                //     Ok(_) => {
-                //         println!("Transaction added.");
-                // },
-                //     Err(e) => println!("Error: {:?}", e),
-                // }
-
                 
             }
 

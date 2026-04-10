@@ -1,10 +1,11 @@
 use std::thread;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use crossbeam::channel::Sender as ReplySender;
+use serde::{Deserialize, Serialize};
 use crate::{TransactionError};
 use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Debug, )]
 pub struct VerificationTask {
     pub sender_name: String,
     pub receiver_name: String,
@@ -14,7 +15,8 @@ pub struct VerificationTask {
     pub sequence: u64,
     pub sender_pubkey: [u8; 32],
     // This allows the worker to send the result back to the Ledger thread
-    pub respond_to: ReplySender<Result<VerificationTask, TransactionError>>,
+    #[serde(skip)] 
+    pub respond_to: Option<ReplySender<Result<VerificationTask, TransactionError>>>,
 }
 pub struct WorkerPool {
     pub sender: Sender<VerificationTask>,
@@ -29,13 +31,15 @@ impl WorkerPool {
             let rx_clone = rx.clone();
             let handle = thread::spawn(move || {
                 while let Ok(task) = rx_clone.recv() {
-                    let responder = task.respond_to.clone();
+                    let responder: Option<Sender<Result<VerificationTask, TransactionError>>> = task.respond_to.clone();
                     
                     // 2. Run the math
                     let result = Self::verify_tx(task);
                     
                     // 3. Send the result (Success or Error) back to the Ledger thread
-                    let _ = responder.send(result);
+                    if let Some(resp) = responder {
+                        let _ = resp.send(result);
+                    }
                 }
             });
             handles.push(handle);
