@@ -70,6 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sequence,
                     sender_pubkey,
                     respond_to: None,
+                    client_respond_to: None,
                 };
                 let req = ClientRequest::Transfer(task);
                 let bytes = bincode::serialize(&req)?;

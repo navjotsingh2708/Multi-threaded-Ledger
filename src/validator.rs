@@ -15,8 +15,10 @@ pub struct VerificationTask {
     pub sequence: u64,
     pub sender_pubkey: [u8; 32],
     // This allows the worker to send the result back to the Ledger thread
-    #[serde(skip)] 
+    #[serde(skip)]
     pub respond_to: Option<ReplySender<Result<VerificationTask, TransactionError>>>,
+    #[serde(skip)]
+    pub client_respond_to: Option<ReplySender<Result<(), TransactionError>>>,
 }
 pub struct WorkerPool {
     pub sender: Sender<VerificationTask>,
@@ -32,13 +34,26 @@ impl WorkerPool {
             let handle = thread::spawn(move || {
                 while let Ok(task) = rx_clone.recv() {
                     let responder: Option<Sender<Result<VerificationTask, TransactionError>>> = task.respond_to.clone();
-                    
+                    let client_responder: Option<Sender<Result<(), TransactionError>>> = task.client_respond_to.clone();
+
                     // 2. Run the math
                     let result = Self::verify_tx(task);
                     
                     // 3. Send the result (Success or Error) back to the Ledger thread
-                    if let Some(resp) = responder {
-                        let _ = resp.send(result);
+                    match result {
+                        Ok(task) => {
+                            if let Some(resp) = responder {
+                                let _ = resp.send(Ok(task));
+                            }
+                            if let Some(cli_resp) = client_responder {
+                                let _ = cli_resp.send(Ok(()));
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(cli_resp) = client_responder {
+                                let _ = cli_resp.send(Err(e));
+                            }
+                        }
                     }
                 }
             });

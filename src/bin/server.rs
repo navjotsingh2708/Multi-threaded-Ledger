@@ -69,15 +69,30 @@ fn handle_connection(mut stream: TcpStream, pool_sender: Sender<VerificationTask
         
             match req {
                 ClientRequest::Transfer(mut task) => {
+                    let (resp_tx, resp_rx) = crossbeam::channel::bounded(1);
+                    task.client_respond_to = Some(resp_tx);
                     task.respond_to = Some(ledger_tx.clone());
                     let sender_pubkey = task.sender_pubkey.clone();
                 
                     pool_sender.send(task).expect("WorkerPool is down.");
-                
+                    match resp_rx.recv() {
+                        Ok(Ok(())) => {
+                            let resp = ServerResponse::Success; 
+                            let bytes = bincode::serialize(&resp).unwrap();
+                            stream.write_all(&bytes).unwrap();
+                        }
+                        Ok(Err(e)) => {
+                            let resp = ServerResponse::Error(e.to_string()); 
+                            let bytes = bincode::serialize(&resp).unwrap();
+                            stream.write_all(&bytes).unwrap();
+                        }
+                        Err(e) => {
+                            let resp = ServerResponse::Error(e.to_string()); 
+                            let bytes = bincode::serialize(&resp).unwrap();
+                            stream.write_all(&bytes).unwrap();
+                        }
+                    }
                     println!("Received task from: {:?}", sender_pubkey);
-                    let resp = ServerResponse::Success; 
-                    let bytes = bincode::serialize(&resp).unwrap();
-                    stream.write_all(&bytes).unwrap();
                 }
                 ClientRequest::GetBalance { name } => {
                     let (resp_tx, resp_rx) = crossbeam::channel::bounded(1);
