@@ -1,4 +1,4 @@
-use std::{io::{Read, Write}, net::{TcpListener, TcpStream}};
+use std::{io::{ErrorKind, Read, Write}, net::{TcpListener, TcpStream}};
 use multi_threaded_ledger::{ClientRequest, LedgerRequest, ServerResponse, threadpool::ThreadPool, validator::VerificationTask};
 use std::{thread};
 use multi_threaded_ledger::{Ledger, TransactionError};
@@ -17,7 +17,7 @@ fn main() {
     let _handle = thread::spawn(move || {
         ledger.run(rx, verified_rx);
     });
-
+    listener.set_nonblocking(true).expect("Cannot set non-blocking");
     loop {
         // Check if handle_connection sent the shutdown signal
         if let Ok(_) = shutdown_rx.try_recv() {
@@ -26,7 +26,8 @@ fn main() {
 
         match listener.accept() {
             Ok((stream, _)) => {
-                 stream.set_nonblocking(false).expect("Failed to set stream to blocking");
+                stream.set_nonblocking(false).expect("Failed to set stream to blocking");
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("Failed to set read timeout");
                 let pool_sender = worker_pool.sender.clone();
                 let ledger_tx = verified_tx.clone();
                 let ledger_req_tx = tx.clone();
@@ -52,20 +53,42 @@ fn handle_connection(mut stream: TcpStream, pool_sender: Sender<VerificationTask
         loop {
             
             let mut header_buffer = [0u8; 4];
-            if let Err(_) = stream.read_exact(&mut header_buffer) {
-                println!("Failed to read header. Connection closed.");
+            if let Err(e) = stream.read_exact(&mut header_buffer) {
+                match e.kind() {
+                    ErrorKind::TimedOut => println!("Header timeout: Closing idle connection."),
+                    ErrorKind::UnexpectedEof => println!("Client disconnected normally."),
+                    _ => eprintln!("Header read error: {e}"),
+                }
                 return;
             }
         
             let len = u32::from_be_bytes(header_buffer) as usize;
-        
+
+            if len > 1024 * 1024 { // 1MB limit for example
+                eprintln!("Maliciously large body size: {len} bytes. Dropping client.");
+                return;
+            }
+
             let mut body_buffer = vec![0u8; len];
-            if let Err(_) = stream.read_exact(&mut body_buffer) {
-                println!("Failed to read body. Connection truncated.");
+            if let Err(e) = stream.read_exact(&mut body_buffer) {
+                match e.kind() {
+                    ErrorKind::TimedOut => println!("Body timeout: Closing idle connection."),
+                    ErrorKind::UnexpectedEof => println!("Client disconnected normally."),
+                    _ => eprintln!("Body read error: {e}"),
+                }
                 return;
             }
         
-            let req: ClientRequest = bincode::deserialize(&body_buffer).expect("Failed to deserialize bytes to ClientRequest");
+            let req = match bincode::deserialize(&body_buffer) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Failed to deserialize bytes to ClientRequest: {e}");
+                    let resp = ServerResponse::Error(e.to_string());
+                    let _ = stream.write_all(&bincode::serialize(&resp).unwrap());
+                    let _ = shutdown_tx.send(());
+                    return;
+                } 
+            };
         
             match req {
                 ClientRequest::Transfer(mut task) => {
