@@ -19,6 +19,16 @@ fn read_cli(prompt: &str) -> Result<String, Box<dyn Error>> {
         }
     }
 }
+
+fn read_response(stream: &mut TcpStream) -> Result<ServerResponse, Box<dyn Error>> {
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header)?;
+    let len = u32::from_be_bytes(header) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body)?;
+    Ok(bincode::deserialize(&body)?)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut stream = TcpStream::connect("127.0.0.1:7878")?;
     loop {
@@ -78,18 +88,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 stream.write_all(&len)?;
                 stream.write_all(&bytes)?;
                 println!("Transaction sent...");
-                let mut resp_buffer = [0u8; 1024];
-                let bytes_read = stream.read(&mut resp_buffer)?;
-
-                if bytes_read > 0 {
-                    let response: ServerResponse = bincode::deserialize(&resp_buffer[..bytes_read]).expect("Failed to parse server response");
-
-                    match response {
-                        ServerResponse::Success => println!("Transaction submitted succesfully"),
-                        ServerResponse::Error(e) => println!("Error - {e}"),
-                        _ => println!("Unexpected response"),
-                    }
-            }
+                match read_response(&mut stream)? {
+                    ServerResponse::Success      => println!("Success"),
+                    ServerResponse::Queued       => println!("Transaction queued"),
+                    // ServerResponse::Balance(b)   => println!("Balance - {b}"),
+                    ServerResponse::Error(e)     => println!("Error - {e}"),
+                    _ => println!("Unexpected Response"),
+                }
         }
 
             "2" | "profile" => {
@@ -109,26 +114,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let bytes = bincode::serialize(&req)?;
                 let len = (bytes.len() as u32).to_be_bytes();
-                if let Err(e) = stream.write_all(&len) {
-                    eprintln!("Failed to write response: {e}");
-                    return Ok(());
-                }
-                if let Err(e) = stream.write_all(&bytes) {
-                    eprintln!("Failed to write response: {e}");
-                    return Ok(());
-                }
-
-                let mut resp_buffer = [0u8; 1024];
-                let bytes_read = stream.read(&mut resp_buffer)?;
-
-                if bytes_read > 0 {
-                    let response: ServerResponse = bincode::deserialize(&resp_buffer[..bytes_read]).expect("Failed to parse server response");
-
-                    match response {
-                        ServerResponse::Success => println!("Account created succesfully"),
-                        ServerResponse::Error(e) => println!("Error - {e}"),
-                        _ => println!("Unexpected response"),
-                    }
+                stream.write_all(&len)?;
+                stream.write_all(&bytes)?;
+                
+                match read_response(&mut stream)? {
+                    ServerResponse::Success => println!("Account created succesfully"),
+                    ServerResponse::Error(e) => println!("Error - {e}"),
+                    _ => println!("Unexpected response"),
                 }
             }
 
@@ -141,18 +133,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 stream.write_all(&len)?;
                 stream.write_all(&bytes)?;
 
-                let mut resp_buffer = [0u8; 1024];
-                let bytes_read = stream.read(&mut resp_buffer)?;
-
-                if bytes_read > 0 {
-                    let response: ServerResponse = bincode::deserialize(&resp_buffer[..bytes_read]).expect("Failed to parse server response");
-
-                    match response {
-                        ServerResponse::Balance(b) => println!("Balance - {b}"),
-                        ServerResponse::Error(e) => println!("Error - {e}"),
-                        _ => println!("Unexpected response"),
-                    }
-                }
+                match read_response(&mut stream)? {
+                    ServerResponse::Balance(b) => println!("Balance - {b}"),
+                    ServerResponse::Error(e) => println!("Error - {e}"),
+                    _ => println!("Unexpected response"),
+                }              
             }
             "5" | "quit" => {
                 let req = ClientRequest::ShutDown;

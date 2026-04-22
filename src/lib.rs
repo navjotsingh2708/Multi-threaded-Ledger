@@ -80,6 +80,13 @@ pub enum ServerResponse {
     Success,
     Balance(u64),
     Error(String),
+    Queued,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum LedgerConfirm {
+    Committed,
+    Queued,
 }
 
 #[derive(Debug)]
@@ -93,6 +100,8 @@ pub enum TransactionError {
     InvalidSignature,
     SequenceTooFar,
     QueueFull,
+    DuplicateSequence,
+    OldSequence,
 }
 
 impl fmt::Display for TransactionError {
@@ -106,7 +115,9 @@ impl fmt::Display for TransactionError {
             Self::IoError => write!(f, "\nA disk I/O error occurred while accessing the ledger log."),
             Self::InvalidSignature => write!(f, "\nCryptographic signature verification failed."),
             Self::SequenceTooFar => write!(f, "\nTransaction Sequence is too ahead in future."),
-            Self::QueueFull => write!(f, "\nYour queue of future transactions is full.")
+            Self::QueueFull => write!(f, "\nYour queue of future transactions is full."),
+            Self::DuplicateSequence => write!(f, "\nThe sequence is a Duplicate of a pending sequence"),
+            Self::OldSequence => write!(f, "\nThe sequence is a Old")
         }
     }
 }
@@ -191,9 +202,7 @@ impl Ledger {
                     if let Ok(result) = task_res {
                         match result {
                             Ok(task) => {
-                                if let Err(e) = self.add(task) {
-                                    eprintln!("Transaction failed: {:?}", e);
-                                }
+                                let _ = self.add(task);
                             },
                             Err(e) => eprintln!("Worker rejected transaction: {:?}", e),
                         }
@@ -234,6 +243,9 @@ impl Ledger {
         self.wal.append(&bytes).map_err(|_| TransactionError::IoError)?;
         self.apply_transaction(tx);
 
+        if let Some(cli_resp) = task.client_respond_to {
+            let _ = cli_resp.send(Ok(LedgerConfirm::Committed));
+        }
         Ok(())
     }
 
@@ -261,24 +273,40 @@ impl Ledger {
         
         if task.sequence <= current_seq {
             println!("DEBUG: Droping old seq: {}", task.sequence);
+            if let Some(cli_resp) = task.client_respond_to {
+                let _ = cli_resp.send(Err(TransactionError::OldSequence));
+            }
             return Ok(());
         }
 
         let max_future_gap = 50;
         if task.sequence > current_seq + max_future_gap {
-            return Err(TransactionError::SequenceTooFar);
+            if let Some(cli_resp) = task.client_respond_to {
+                let _ = cli_resp.send(Err(TransactionError::SequenceTooFar));
+            }
+            return Ok(());
         }
 
         if task.sequence > current_seq + 1 {
             let user_queue = self.pending_queue.entry(task.sender_pubkey).or_default();
             if user_queue.contains_key(&task.sequence) {
                 println!("\nDEBUG: Dropping duplicate pending sequence: {}", task.sequence);
+                if let Some(cli_resp) = task.client_respond_to {
+                    let _ = cli_resp.send(Err(TransactionError::DuplicateSequence));
+                }
                 return Ok(()); // Drop it. We already have a candidate for this sequence.
             }
             if user_queue.len() >= 20 {
-                return Err(TransactionError::QueueFull);
+                if let Some(r) = task.client_respond_to {
+                    let _ = r.send(Err(TransactionError::QueueFull));
+                }
+                return Ok(());
             }
+            let client_resp = task.client_respond_to.clone();
             user_queue.insert(task.sequence, task);
+            if let Some(r) = client_resp {
+                let _ = r.send(Ok(LedgerConfirm::Queued));
+            }
             return Ok(());
         }
 

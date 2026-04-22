@@ -1,5 +1,5 @@
 use std::{io::{ErrorKind, Read, Write}, net::{TcpListener, TcpStream}};
-use multi_threaded_ledger::{ClientRequest, LedgerRequest, ServerResponse, threadpool::ThreadPool, validator::VerificationTask};
+use multi_threaded_ledger::{ClientRequest, LedgerConfirm, LedgerRequest, ServerResponse, threadpool::ThreadPool, validator::VerificationTask};
 use std::{thread};
 use multi_threaded_ledger::{Ledger, TransactionError};
 use crossbeam::channel::{unbounded, bounded,Sender};
@@ -27,7 +27,7 @@ fn main() {
         match listener.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false).expect("Failed to set stream to blocking");
-                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("Failed to set read timeout");
+                // stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("Failed to set read timeout");
                 let pool_sender = worker_pool.sender.clone();
                 let ledger_tx = verified_tx.clone();
                 let ledger_req_tx = tx.clone();
@@ -46,6 +46,13 @@ fn main() {
         }
     }
     println!("Shutting down.");
+}
+
+fn send_response(stream: &mut TcpStream, resp: &ServerResponse) {
+    let bytes = bincode::serialize(resp).expect("Failed to serialize response");
+    let len = (bytes.len() as u32).to_be_bytes();
+    let _ = stream.write_all(&len);
+    let _ = stream.write_all(&bytes);
 }
 
 fn handle_connection(mut stream: TcpStream, pool_sender: Sender<VerificationTask>, 
@@ -83,8 +90,7 @@ fn handle_connection(mut stream: TcpStream, pool_sender: Sender<VerificationTask
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("Failed to deserialize bytes to ClientRequest: {e}");
-                    let resp = ServerResponse::Error(e.to_string());
-                    let _ = stream.write_all(&bincode::serialize(&resp).unwrap());
+                    send_response(&mut stream, &ServerResponse::Error(e.to_string()));
                     let _ = shutdown_tx.send(());
                     return;
                 } 
@@ -98,24 +104,14 @@ fn handle_connection(mut stream: TcpStream, pool_sender: Sender<VerificationTask
                     let sender_pubkey = task.sender_pubkey.clone();
                 
                     pool_sender.send(task).expect("WorkerPool is down.");
-                    match resp_rx.recv() {
-                        Ok(Ok(())) => {
-                            let resp = ServerResponse::Success; 
-                            let bytes = bincode::serialize(&resp).unwrap();
-                            stream.write_all(&bytes).unwrap();
-                        }
-                        Ok(Err(e)) => {
-                            let resp = ServerResponse::Error(e.to_string()); 
-                            let bytes = bincode::serialize(&resp).unwrap();
-                            stream.write_all(&bytes).unwrap();
-                        }
-                        Err(e) => {
-                            let resp = ServerResponse::Error(e.to_string()); 
-                            let bytes = bincode::serialize(&resp).unwrap();
-                            stream.write_all(&bytes).unwrap();
-                        }
-                    }
-                    println!("Received task from: {:?}", sender_pubkey);
+                    let resp = match resp_rx.recv() {
+                    Ok(Ok(LedgerConfirm::Committed)) => ServerResponse::Success,
+                    Ok(Ok(LedgerConfirm::Queued)) => ServerResponse::Queued,
+                    Ok(Err(e)) => ServerResponse::Error(e.to_string()),
+                    Err(e) => ServerResponse::Error(e.to_string()),
+                };
+                send_response(&mut stream, &resp);
+                println!("Received task from: {:?}", sender_pubkey);
                 }
                 ClientRequest::GetBalance { name } => {
                     let (resp_tx, resp_rx) = crossbeam::channel::bounded(1);
@@ -123,57 +119,28 @@ fn handle_connection(mut stream: TcpStream, pool_sender: Sender<VerificationTask
                     let ledger_req = LedgerRequest::GetBalance { name, respond_to: resp_tx };
                     ledger_req_tx.send(ledger_req).expect("Main thread(Ledger) is down.");
         
-                    match resp_rx.recv() {
-                        Ok(Ok(b)) => {
-                            let resp = ServerResponse::Balance(b);
-                            let bytes = bincode::serialize(&resp).expect("Failed at serialization.");
-                            stream.write_all(&bytes).unwrap();
-                        }
-                        Ok(Err(e)) => {
-                            let resp = ServerResponse::Error(e.to_string());
-                            let bytes = bincode::serialize(&resp).expect("Failed at serialization.");
-                            stream.write_all(&bytes).unwrap();
-                        }
-                        Err(e) => {
-                            println!("Ledger droped the response channel.");
-                            let resp = ServerResponse::Error(e.to_string());
-                            let bytes = bincode::serialize(&resp).expect("Failed at serialization.");
-                            stream.write_all(&bytes).unwrap();
-                        },
-                    }
+                    let resp = match resp_rx.recv() {
+                        Ok(Ok(b))  => ServerResponse::Balance(b),
+                        Ok(Err(e)) => ServerResponse::Error(e.to_string()),
+                        Err(e)     => ServerResponse::Error(e.to_string()),
+                    };
+                    send_response(&mut stream, &resp);
                 }
                 ClientRequest::CreateProfile { name, balance, key } => {
                     let (resp_tx, resp_rx) = crossbeam::channel::bounded(1);
                     let ledger_req = LedgerRequest::Profile { name, key, balance, respond_to: resp_tx };
                     ledger_req_tx.send(ledger_req).expect("Main thread(Ledger) is down.");
         
-                    match resp_rx.recv() {
-                        Ok(Ok(_)) => {
-                            println!("Profile created successfully.");
-                            let resp = ServerResponse::Success; 
-                            let bytes = bincode::serialize(&resp).unwrap();
-                            stream.write_all(&bytes).unwrap();
-                        },
-                        Ok(Err(e)) => {
-                            println!("Error - {e}");
-                            let resp = ServerResponse::Error(e.to_string()); 
-                            let bytes = bincode::serialize(&resp).unwrap();
-                            stream.write_all(&bytes).unwrap();
-                        },
-                        Err(e) => {
-                            println!("Ledger droped the response channel.");
-                            let resp = ServerResponse::Error(e.to_string()); 
-                            let bytes = bincode::serialize(&resp).unwrap();
-                            stream.write_all(&bytes).unwrap();
-                        },
-                    }
+                    let resp = match resp_rx.recv() {
+                        Ok(Ok(_))  => ServerResponse::Success,
+                        Ok(Err(e)) => ServerResponse::Error(e.to_string()),
+                        Err(e)     => ServerResponse::Error(e.to_string()),
+                    };
+                    send_response(&mut stream, &resp);
                 }
                 ClientRequest::ShutDown => {
                     println!("!!! REMOTE SHUTDOWN INITIATED !!!");
-        
-                    let resp = ServerResponse::Success;
-                    let _ = stream.write_all(&bincode::serialize(&resp).unwrap());
-        
+                    send_response(&mut stream, &ServerResponse::Success);
                     let _ = shutdown_tx.send(());
                     return;
                 }
