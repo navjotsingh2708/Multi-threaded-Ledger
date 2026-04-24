@@ -97,6 +97,7 @@ pub enum TransactionError {
     AccountAlreadyExists,
     NotEnoughBalance,
     IoError,
+    WalError,
     InvalidSignature,
     SequenceTooFar,
     QueueFull,
@@ -113,6 +114,7 @@ impl fmt::Display for TransactionError {
             Self::AccountAlreadyExists => write!(f, "\nAn account with this name already exists."),
             Self::NotEnoughBalance => write!(f, "\nInsufficient funds to complete this transaction."),
             Self::IoError => write!(f, "\nA disk I/O error occurred while accessing the ledger log."),
+            Self::WalError => write!(f, "\nA WAL error occurred while writing to the ledger log."),
             Self::InvalidSignature => write!(f, "\nCryptographic signature verification failed."),
             Self::SequenceTooFar => write!(f, "\nTransaction Sequence is too ahead in future."),
             Self::QueueFull => write!(f, "\nYour queue of future transactions is full."),
@@ -225,7 +227,7 @@ impl Ledger {
             .name_to_key
             .get(&task.receiver_name)
             .ok_or(TransactionError::AccountNotFound)?;
-        let receiver_vk = VerifyingKey::from_bytes(receiver_key).map_err(|_| TransactionError::IoError)?;
+        let receiver_vk = VerifyingKey::from_bytes(receiver_key).map_err(|_| TransactionError::InvalidSignature)?;
 
 
         let tx = Transaction {
@@ -240,7 +242,7 @@ impl Ledger {
         let entry = WalEntry::Transfer(tx.clone());
         let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
         let bytes = config.serialize(&entry).map_err(|_| TransactionError::IoError)?;
-        self.wal.append(&bytes).map_err(|_| TransactionError::IoError)?;
+        self.wal.append(bytes).map_err(|_| TransactionError::WalError)?;
         self.apply_transaction(tx);
 
         if let Some(cli_resp) = task.client_respond_to {
@@ -349,7 +351,7 @@ impl Ledger {
 
         let config = bincode::DefaultOptions::new().with_fixint_encoding().allow_trailing_bytes();
         let bytes = config.serialize(&entry).map_err(|_| TransactionError::IoError)?;
-        self.wal.append(&bytes).map_err(|_| TransactionError::IoError)?;
+        self.wal.append(bytes).map_err(|_| TransactionError::WalError)?;
         
 
         self.accounts.name_to_key.insert(name.clone(), key);
@@ -454,4 +456,91 @@ impl Ledger {
 
         Ok(list)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // helper — creates a test ledger with two accounts
+    // called at the start of every test that needs accounts
+    fn setup_ledger(filename: &str) -> Ledger {
+        let mut ledger = Ledger::new(filename)
+            .expect("Failed to create test ledger");
+        
+        let alice_key = crypto::setup("alice").expect("Crypto alice error"); // fake public key, all 1s
+        let bob_key   = crypto::setup("bob").expect("Crypto bob error"); // fake public key, all 2s
+        
+        ledger.set_test_account("alice".into(), alice_key.to_bytes(), 1000);
+        ledger.set_test_account("bob".into(),   bob_key.to_bytes(),   500);
+        ledger
+    }
+    #[test]
+    fn test_basic_transfer_update_balances() {
+        let mut ledger = setup_ledger("T1.log");
+        let task = VerificationTask {
+            sender_name: "alice".into(),
+            receiver_name: "bob".into(),
+            amount: 100,
+            client_respond_to: None,
+            timestamp: 0,
+            signature: Signature::from_bytes(&[0u8; 64]),
+            sequence: 1,
+            sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
+            respond_to: None,
+        };
+        let _ = ledger.add(task);
+        assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 900);
+        assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 600);
+    }
+    
+    #[test]
+    fn test_future_sequence_then_applied() {
+        let mut ledger = setup_ledger("T2.log");
+        let task = VerificationTask {
+            sender_name: "alice".into(),
+            receiver_name: "bob".into(),
+            amount: 100,
+            client_respond_to: None,
+            timestamp: 0,
+            signature: Signature::from_bytes(&[0u8; 64]),
+            sequence: 2,
+            sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
+            respond_to: None,
+        };
+        let _ = ledger.add(task);
+        assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 1000);
+        assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 500);
+
+        let task = VerificationTask {
+            sender_name: "alice".into(),
+            receiver_name: "bob".into(),
+            amount: 100,
+            client_respond_to: None,
+            timestamp: 0,
+            signature: Signature::from_bytes(&[0u8; 64]),
+            sequence: 3,
+            sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
+            respond_to: None,
+        };
+        let _ = ledger.add(task);
+        assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 1000);
+        assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 500);
+        
+        let task = VerificationTask {
+            sender_name: "alice".into(),
+            receiver_name: "bob".into(),
+            amount: 100,
+            client_respond_to: None,
+            timestamp: 0,
+            signature: Signature::from_bytes(&[0u8; 64]),
+            sequence: 1,
+            sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
+            respond_to: None,
+        };
+        let _ = ledger.add(task);
+        assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 700);
+        assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 800);
+    }
+
 }

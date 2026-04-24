@@ -19,7 +19,6 @@ impl ThreadPool {
 
         let (sender, receiver) = bounded(size);
         let mut workers = Vec::with_capacity(size);
-        // let receiver = Arc::new(Mutex::new(receiver));
 
         for id in 0..size {
             workers.push(Worker::new(id, receiver.clone()));

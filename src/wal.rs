@@ -1,69 +1,96 @@
-use std::io::{Write, BufWriter};
+use std::io::{BufWriter, Error, Write};
 use std::thread;
 use crossbeam::channel::{Sender, bounded, tick};
 use crossbeam::select;
 
 pub struct Wal {
     // writer: BufWriter<File>,
-    tx: Sender<Vec<u8>>
+    tx: Sender<Message>
+}
+
+enum Message {
+    Writer {
+        data: Vec<u8>,
+        confirm: Sender<Result<(), String>>,
+    }
 }
 
 impl Wal {
     pub fn new(path: &str) -> std::io::Result<Self> {
         // Ok(Self { writer: BufWriter::new(file) })
-        let (tx, rx) = bounded::<Vec<u8>>(10000);
+        let (tx, rx) = bounded::<>(10000);
         let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
 
         thread::spawn(move || {
             let mut writer = BufWriter::new(file);
             let ticker = tick(std::time::Duration::from_millis(10));
-            let mut buffer: Vec<Vec<u8>> = Vec::with_capacity(100);
+            let mut data_buffer: Vec<Vec<u8>> = Vec::with_capacity(100);
+            let mut confirm_buffer = Vec::with_capacity(100);
 
             loop {
                 let mut should_flush = false;
                 select! {
-                    recv(rx) -> trans => {
-                        let trans: Vec<u8> = match trans {
-                            Ok(t) => t,
+                    recv(rx) -> msg => {
+                        match msg {
+                            Ok(Message::Writer { data, confirm }) => {
+                                data_buffer.push(data);
+                                confirm_buffer.push(confirm);
+                                if data_buffer.len() > 100 {should_flush = true}
+                            },
                             Err(_) => {
-                                for entry in &buffer {
+                                for entry in &data_buffer {
                                     writer.write_all(entry).expect("Disk write failed");
                                 }
                                 writer.flush().expect("Flush failed");
                                 writer.get_mut().sync_all().expect("Sync failed");
-                                buffer.clear();
+                                data_buffer.clear();
                                 break;
                             },
                         };
-                        buffer.push(trans);
-                        if buffer.len() >= 100 {
-                            should_flush = true;
-                        }
                     }
 
                     recv(ticker) -> _ => {
-                        if !buffer.is_empty() {
+                        if !data_buffer.is_empty() {
                             should_flush = true;
                         }
                     }
                 }
                 if should_flush == true {
-                    for entry in &buffer {
-                        writer.write_all(entry).expect("Disk write failed");
+                    let result: Result<(), Error> = (|| {
+                        for entry in &data_buffer {
+                            writer.write_all(entry)?;
+                        }
+                        writer.flush()?;
+                        writer.get_mut().sync_all()?;
+                        Ok(())
+                    })();
+
+                    match result {
+                        Ok(_) => {
+                            for tx in confirm_buffer.drain(..) {
+                                let _ = tx.send(Ok(()));
+                            }
+                        },
+                        Err(e) => {
+                            for tx in confirm_buffer.drain(..) {
+                                let _ = tx.send(Err(e.to_string()));
+                            }
+                        }
                     }
-                    writer.flush().expect("Flush failed");
-                    writer.get_mut().sync_all().expect("Sync failed");
-                    buffer.clear();
+                    data_buffer.clear();
                 }
             }
         });
         Ok(Self { tx })
     }
 
-    pub fn append(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.tx.send(data.to_vec()).map_err(|_| {
+    pub fn append(&mut self, data: Vec<u8>) -> Result<(), std::io::Error> {
+        let (tx, rx) = bounded(1);
+        self.tx.send(Message::Writer { data, confirm: tx }).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Wal thread crashed")
         })?;
+
+        let _ = rx.recv().map_err(|_| Error::new(std::io::ErrorKind::BrokenPipe, "WAL down"))?;
         Ok(())
     }
 }
