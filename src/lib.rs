@@ -138,8 +138,8 @@ impl Transaction {
 }
 
 impl Ledger {
-    pub fn new(path: &str) -> std::io::Result<Self> {
-        let wal = wal::Wal::new(path)?;
+    pub fn new(path: &str, shutdown_tx: Sender<()>) -> std::io::Result<Self> {
+        let wal = wal::Wal::new(path, shutdown_tx)?;
         Ok(Ledger {accounts: Profiles { balances: HashMap::new(), names: HashMap::new(), name_to_key: HashMap::new(), sequences: HashMap::new() }, wal, pending_queue: HashMap::new()})
     }
 
@@ -465,7 +465,7 @@ mod tests {
     // helper — creates a test ledger with two accounts
     // called at the start of every test that needs accounts
     fn setup_ledger(filename: &str) -> Ledger {
-        let mut ledger = Ledger::new(filename)
+        let mut ledger = Ledger::new(filename, None)
             .expect("Failed to create test ledger");
         
         let alice_key = crypto::setup("alice").expect("Crypto alice error"); // fake public key, all 1s

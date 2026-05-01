@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     _ => println!("Unexpected response"),
                 }              
             }
-            "5" | "quit" => {
+            "4" | "quit" => {
                 let req = ClientRequest::ShutDown;
                 let bytes = bincode::serialize(&req)?;
                 let len = (bytes.len() as u32).to_be_bytes();

@@ -13,7 +13,7 @@ fn main() {
     let (tx, rx) = unbounded::<multi_threaded_ledger::LedgerRequest>();
     let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
     let path = "ledger.log";
-    let ledger = Ledger::new(path).expect("Failed to open Ledger WAL file");
+    let ledger = Ledger::new(path, shutdown_tx.clone()).expect("Failed to open Ledger WAL file");
     let _handle = thread::spawn(move || {
         ledger.run(rx, verified_rx);
     });
