@@ -22,8 +22,8 @@ pub struct VerificationTask {
     pub client_respond_to: Option<ReplySender<Result<LedgerConfirm, TransactionError>>>,
 }
 pub struct WorkerPool {
-    pub sender: Sender<VerificationTask>,
-    _handles: Vec<thread::JoinHandle<()>>
+    pub sender: Option<Sender<VerificationTask>>,
+    handles: Vec<thread::JoinHandle<()>>
 }
 
 impl WorkerPool {
@@ -71,7 +71,7 @@ impl WorkerPool {
             });
             handles.push(handle);
         }
-        WorkerPool { sender: tx, _handles: handles }
+        WorkerPool { sender: Some(tx), handles }
     }
     fn verify_tx(task: VerificationTask) -> Result<VerificationTask, TransactionError> {
         let sender_vk = VerifyingKey::from_bytes(&task.sender_pubkey).map_err(|_| TransactionError::InvalidSignature)?;
@@ -84,5 +84,15 @@ impl WorkerPool {
     
         sender_vk.verify(&message, &task.signature).map_err(|_| TransactionError::InvalidSignature)?;
         Ok(task)
+    }
+
+}
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        for h in self.handles.drain(..) {
+            h.join().expect("Workerpool thread panicked");
+        }
     }
 }

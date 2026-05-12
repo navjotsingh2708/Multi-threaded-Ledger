@@ -140,17 +140,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }              
             }
             "4" | "quit" => {
-                let req = ClientRequest::ShutDown;
-                let bytes = bincode::serialize(&req)?;
-                let len = (bytes.len() as u32).to_be_bytes();
-                stream.write_all(&len)?;
-                stream.write_all(&bytes)?;
-                println!("Shutdown command sent. Exiting client.");
+                println!("Disconnecting..");
                 break; // Exit the client loop
             }
 
             _ => {
-                println!("Unexpected input! (press 5 or quit to exit)");
+                println!("Unexpected input! (press 4 or quit to exit)");
             }
         }
     }

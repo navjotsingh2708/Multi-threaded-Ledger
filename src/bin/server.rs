@@ -13,8 +13,8 @@ fn main() {
     let (tx, rx) = unbounded::<multi_threaded_ledger::LedgerRequest>();
     let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
     let path = "ledger.log";
-    let ledger = Ledger::new(path, shutdown_tx.clone()).expect("Failed to open Ledger WAL file");
-    let _handle = thread::spawn(move || {
+    let ledger = Ledger::new(path, shutdown_tx).expect("Failed to open Ledger WAL file");
+    let ledger_handle = thread::spawn(move || {
         ledger.run(rx, verified_rx);
     });
     listener.set_nonblocking(true).expect("Cannot set non-blocking");
@@ -28,13 +28,12 @@ fn main() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false).expect("Failed to set stream to blocking");
                 // stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("Failed to set read timeout");
-                let pool_sender = worker_pool.sender.clone();
+                let pool_sender = worker_pool.sender.as_ref().expect("WorkerPool not intialized").clone();
                 let ledger_tx = verified_tx.clone();
                 let ledger_req_tx = tx.clone();
-                let s_tx = shutdown_tx.clone(); // Pass the signal sender
                 
                 thread_pool.execute(move || {
-                    handle_connection(stream, pool_sender, ledger_tx, ledger_req_tx, s_tx);
+                    handle_connection(stream, pool_sender, ledger_tx, ledger_req_tx);
                 });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -45,7 +44,13 @@ fn main() {
             Err(e) => eprintln!("Connection error: {e}"),
         }
     }
-    println!("Shutting down.");
+    println!("Shutting down - draining connections..");
+    drop(thread_pool);
+    drop(worker_pool);
+    drop(verified_tx);
+    drop(tx);
+    ledger_handle.join().expect("Ledger thread panicked");
+    println!("Clean shutdown complete.")
 }
 
 fn send_response(stream: &mut TcpStream, resp: &ServerResponse) {
@@ -56,7 +61,7 @@ fn send_response(stream: &mut TcpStream, resp: &ServerResponse) {
 }
 
 fn handle_connection(mut stream: TcpStream, pool_sender: Sender<VerificationTask>, 
-    ledger_tx: Sender<Result<VerificationTask, TransactionError>>, ledger_req_tx: Sender<LedgerRequest>, shutdown_tx: Sender<()>) {
+    ledger_tx: Sender<Result<VerificationTask, TransactionError>>, ledger_req_tx: Sender<LedgerRequest>) {
         loop {
             
             let mut header_buffer = [0u8; 4];
@@ -91,7 +96,6 @@ fn handle_connection(mut stream: TcpStream, pool_sender: Sender<VerificationTask
                 Err(e) => {
                     eprintln!("Failed to deserialize bytes to ClientRequest: {e}");
                     send_response(&mut stream, &ServerResponse::Error(e.to_string()));
-                    let _ = shutdown_tx.send(());
                     return;
                 } 
             };
@@ -137,12 +141,6 @@ fn handle_connection(mut stream: TcpStream, pool_sender: Sender<VerificationTask
                         Err(e)     => ServerResponse::Error(e.to_string()),
                     };
                     send_response(&mut stream, &resp);
-                }
-                ClientRequest::ShutDown => {
-                    println!("!!! REMOTE SHUTDOWN INITIATED !!!");
-                    send_response(&mut stream, &ServerResponse::Success);
-                    let _ = shutdown_tx.send(());
-                    return;
                 }
             }
         }

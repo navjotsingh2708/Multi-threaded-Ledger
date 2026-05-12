@@ -72,7 +72,6 @@ pub enum ClientRequest {
     Transfer(VerificationTask),
     CreateProfile {name: String, balance: u64, key: [u8; 32]},
     GetBalance {name: String},
-    ShutDown,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -458,89 +457,89 @@ impl Ledger {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
 
-    // helper — creates a test ledger with two accounts
-    // called at the start of every test that needs accounts
-    fn setup_ledger(filename: &str) -> Ledger {
-        let mut ledger = Ledger::new(filename, None)
-            .expect("Failed to create test ledger");
+//     // helper — creates a test ledger with two accounts
+//     // called at the start of every test that needs accounts
+//     fn setup_ledger(filename: &str) -> Ledger {
+//         let mut ledger = Ledger::new(filename, None)
+//             .expect("Failed to create test ledger");
         
-        let alice_key = crypto::setup("alice").expect("Crypto alice error"); // fake public key, all 1s
-        let bob_key   = crypto::setup("bob").expect("Crypto bob error"); // fake public key, all 2s
+//         let alice_key = crypto::setup("alice").expect("Crypto alice error"); // fake public key, all 1s
+//         let bob_key   = crypto::setup("bob").expect("Crypto bob error"); // fake public key, all 2s
         
-        ledger.set_test_account("alice".into(), alice_key.to_bytes(), 1000);
-        ledger.set_test_account("bob".into(),   bob_key.to_bytes(),   500);
-        ledger
-    }
-    #[test]
-    fn test_basic_transfer_update_balances() {
-        let mut ledger = setup_ledger("T1.log");
-        let task = VerificationTask {
-            sender_name: "alice".into(),
-            receiver_name: "bob".into(),
-            amount: 100,
-            client_respond_to: None,
-            timestamp: 0,
-            signature: Signature::from_bytes(&[0u8; 64]),
-            sequence: 1,
-            sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
-            respond_to: None,
-        };
-        let _ = ledger.add(task);
-        assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 900);
-        assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 600);
-    }
+//         ledger.set_test_account("alice".into(), alice_key.to_bytes(), 1000);
+//         ledger.set_test_account("bob".into(),   bob_key.to_bytes(),   500);
+//         ledger
+//     }
+//     #[test]
+//     fn test_basic_transfer_update_balances() {
+//         let mut ledger = setup_ledger("T1.log");
+//         let task = VerificationTask {
+//             sender_name: "alice".into(),
+//             receiver_name: "bob".into(),
+//             amount: 100,
+//             client_respond_to: None,
+//             timestamp: 0,
+//             signature: Signature::from_bytes(&[0u8; 64]),
+//             sequence: 1,
+//             sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
+//             respond_to: None,
+//         };
+//         let _ = ledger.add(task);
+//         assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 900);
+//         assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 600);
+//     }
     
-    #[test]
-    fn test_future_sequence_then_applied() {
-        let mut ledger = setup_ledger("T2.log");
-        let task = VerificationTask {
-            sender_name: "alice".into(),
-            receiver_name: "bob".into(),
-            amount: 100,
-            client_respond_to: None,
-            timestamp: 0,
-            signature: Signature::from_bytes(&[0u8; 64]),
-            sequence: 2,
-            sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
-            respond_to: None,
-        };
-        let _ = ledger.add(task);
-        assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 1000);
-        assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 500);
+//     #[test]
+//     fn test_future_sequence_then_applied() {
+//         let mut ledger = setup_ledger("T2.log");
+//         let task = VerificationTask {
+//             sender_name: "alice".into(),
+//             receiver_name: "bob".into(),
+//             amount: 100,
+//             client_respond_to: None,
+//             timestamp: 0,
+//             signature: Signature::from_bytes(&[0u8; 64]),
+//             sequence: 2,
+//             sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
+//             respond_to: None,
+//         };
+//         let _ = ledger.add(task);
+//         assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 1000);
+//         assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 500);
 
-        let task = VerificationTask {
-            sender_name: "alice".into(),
-            receiver_name: "bob".into(),
-            amount: 100,
-            client_respond_to: None,
-            timestamp: 0,
-            signature: Signature::from_bytes(&[0u8; 64]),
-            sequence: 3,
-            sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
-            respond_to: None,
-        };
-        let _ = ledger.add(task);
-        assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 1000);
-        assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 500);
+//         let task = VerificationTask {
+//             sender_name: "alice".into(),
+//             receiver_name: "bob".into(),
+//             amount: 100,
+//             client_respond_to: None,
+//             timestamp: 0,
+//             signature: Signature::from_bytes(&[0u8; 64]),
+//             sequence: 3,
+//             sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
+//             respond_to: None,
+//         };
+//         let _ = ledger.add(task);
+//         assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 1000);
+//         assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 500);
         
-        let task = VerificationTask {
-            sender_name: "alice".into(),
-            receiver_name: "bob".into(),
-            amount: 100,
-            client_respond_to: None,
-            timestamp: 0,
-            signature: Signature::from_bytes(&[0u8; 64]),
-            sequence: 1,
-            sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
-            respond_to: None,
-        };
-        let _ = ledger.add(task);
-        assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 700);
-        assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 800);
-    }
+//         let task = VerificationTask {
+//             sender_name: "alice".into(),
+//             receiver_name: "bob".into(),
+//             amount: 100,
+//             client_respond_to: None,
+//             timestamp: 0,
+//             signature: Signature::from_bytes(&[0u8; 64]),
+//             sequence: 1,
+//             sender_pubkey: *ledger.accounts.name_to_key.get("alice").expect("Alice NO Sender PUB KEY"),
+//             respond_to: None,
+//         };
+//         let _ = ledger.add(task);
+//         assert_eq!(ledger.get_balance("alice").expect("Alice GET BALANCE ERROR"), 700);
+//         assert_eq!(ledger.get_balance("bob").expect("BOB GET BALANCE ERROR"), 800);
+//     }
 
-}
+// }

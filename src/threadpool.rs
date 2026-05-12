@@ -24,8 +24,6 @@ impl ThreadPool {
             workers.push(Worker::new(id, receiver.clone()));
         }
         ThreadPool { workers, sender: Some(sender) }
-
-
     }
 
     pub fn execute<F>(&self, f: F) where F: FnOnce() + Send + 'static, {

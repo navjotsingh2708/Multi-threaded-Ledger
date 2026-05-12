@@ -1,5 +1,5 @@
 use std::io::{BufWriter, Error, Write};
-use std::panic::catch_unwind;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::thread;
 use crossbeam::channel::{Sender, bounded, tick};
 use crossbeam::select;
@@ -22,7 +22,7 @@ impl Wal {
         let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
 
         thread::spawn(move || {
-            let result = catch_unwind(|| {
+            let result = catch_unwind(AssertUnwindSafe(|| {
 
                 let mut writer = BufWriter::new(file);
                 let ticker = tick(std::time::Duration::from_millis(10));
@@ -98,12 +98,12 @@ impl Wal {
                         data_buffer.clear();
                     }
                 }
-            });
+            }));
             match result {
                 Ok(()) => {},
                 Err(_) => {
                     let _ = shutdown_tx.send(());
-                    return; // is this correct as now it can't send the ok(()).
+                    return;
                 }
 
             }
