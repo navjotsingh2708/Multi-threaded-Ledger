@@ -15,7 +15,7 @@ fn main() {
     let path = "ledger.log";
     let ledger = Ledger::new(path, Some(shutdown_tx)).expect("Failed to open Ledger WAL file");
     let ledger_handle = thread::spawn(move || {
-        ledger.run(rx, verified_rx);
+        ledger.run(path, rx, verified_rx);
     });
     listener.set_nonblocking(true).expect("Cannot set non-blocking");
     loop {

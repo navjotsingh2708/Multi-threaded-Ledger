@@ -154,8 +154,8 @@ impl Ledger {
         self.accounts.sequences.insert(*key, 0);
     }
 
-    pub fn run(mut self, cli_rx: Receiver<LedgerRequest>, verified_rx: Receiver<Result<VerificationTask, TransactionError>>) {
-        self.recover().ok();
+    pub fn run(mut self, path: &str, cli_rx: Receiver<LedgerRequest>, verified_rx: Receiver<Result<VerificationTask, TransactionError>>) {
+        self.recover(path).ok();
 
         loop {
             select! {
@@ -367,8 +367,8 @@ impl Ledger {
         self.accounts.balances.get(key).copied().ok_or(TransactionError::AccountNotFound)
     }
 
-    pub fn recover(&mut self) -> std::io::Result<()> {
-        let file = std::fs::File::open("ledger.log").map_err(|e| {
+    pub fn recover(&mut self, path: &str) -> std::io::Result<()> {
+        let file = std::fs::File::open(path).map_err(|e| {
             println!("\nDEBUG: No ledger.log found! Creating fresh state.");
             e
         })?;
@@ -462,16 +462,17 @@ impl Ledger {
 mod tests {
     use super::*;
     
-    struct TestCleanup(String);
+    struct TestCleanup(Vec<String>);
     impl Drop for TestCleanup {
         fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
+            for path in &self.0 {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
     // helper — creates a test ledger with two accounts
     // called at the start of every test that needs accounts
     fn setup_ledger(filename: &str) -> Ledger {
-        let _cleanup = TestCleanup(filename.into());
         let mut ledger = Ledger::new(filename, None).expect("Failed to create test ledger");
         
         let alice_key = crypto::setup("alice").expect("Crypto alice error");
@@ -484,6 +485,9 @@ mod tests {
 
     #[test]
     fn test_basic_transfer_update_balances() {
+        let _cleanup = TestCleanup(vec![
+    "T1.log".into(), "alice.key".into(), "bob.key".into()
+        ]);
         let mut ledger = setup_ledger("T1.log");
         let task = VerificationTask {
             sender_name: "alice".into(),
@@ -503,6 +507,9 @@ mod tests {
     
     #[test]
     fn test_insufficient_balance() {
+        let _cleanup = TestCleanup(vec![
+    "T2.log".into(), "alice.key".into(), "bob.key".into()
+        ]);
         let mut ledger = setup_ledger("T2.log");
         let task = VerificationTask {
             sender_name: "alice".into(),
@@ -522,6 +529,9 @@ mod tests {
 
     #[test]
     fn test_old_sequence_rejected() {
+        let _cleanup = TestCleanup(vec![
+    "T3.log".into(), "alice.key".into(), "bob.key".into()
+        ]);
         let mut ledger = setup_ledger("T3.log");
         let task = VerificationTask {
             sender_name: "alice".into(),
@@ -556,6 +566,9 @@ mod tests {
 
     #[test]
     fn test_future_sequence_then_applied() {
+        let _cleanup = TestCleanup(vec![
+    "T4.log".into(), "alice.key".into(), "bob.key".into()
+        ]);
         let mut ledger = setup_ledger("T4.log");
         let task = VerificationTask {
             sender_name: "alice".into(),
@@ -606,10 +619,18 @@ mod tests {
     #[test]
     fn duplicate_profile_rejected() {
         // in test_account creation it agrees to create duplicate profile but not in the production code but there is one flaw: alice != Alice or any word difference(aLice, alIce, ... , ALICE) as mutliple named alice can be created but they are different in form of accounts because of different spellings.
+        let _cleanup = TestCleanup(vec!["T5.log".into(), "alice.key".into(), "bob.key".into()]);
+        let mut ledger = setup_ledger("T5.log");
+        
+        let result = ledger.profile("alice".into(), 500, [3u8; 32], 0);
+        assert_eq!(result.unwrap_err(), TransactionError::AccountAlreadyExists);
     }
 
     #[test]
     fn account_not_found_rejected() {
+        let _cleanup = TestCleanup(vec![
+    "T6.log".into(), "alice.key".into(), "bob.key".into()
+        ]);
         let mut ledger = setup_ledger("T6.log");
         let task = VerificationTask {
             sender_name: "alice".into(),
