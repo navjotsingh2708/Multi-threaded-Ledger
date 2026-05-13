@@ -16,7 +16,7 @@ enum Message {
 }
 
 impl Wal {
-    pub fn new(path: &str, shutdown_tx: Sender<()>) -> std::io::Result<Self> {
+    pub fn new(path: &str, shutdown_tx: Option<Sender<()>>) -> std::io::Result<Self> {
         // Ok(Self { writer: BufWriter::new(file) })
         let (tx, rx) = bounded::<>(10000);
         let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
@@ -102,8 +102,10 @@ impl Wal {
             match result {
                 Ok(()) => {},
                 Err(_) => {
-                    let _ = shutdown_tx.send(());
-                    return;
+                    if let Some(shutdown_tx) = shutdown_tx {
+                        let _ = shutdown_tx.send(());
+                        return;
+                    }
                 }
 
             }
